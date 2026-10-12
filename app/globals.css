@@ -24,3 +24,37 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Firefox Scrollbar */
+
+{
+scrollbar-width: thin;
+scrollbar-color: #cbd5e1 transparent;
+}
+
+/* Chrome, Edge, and Safari Scrollbar */
+::-webkit-scrollbar {
+width: 6px;
+height: 6px;
+}
+
+::-webkit-scrollbar-track {
+background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+background-color: #cbd5e1;
+border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+background-color: #94a3b8;
+}
+
+

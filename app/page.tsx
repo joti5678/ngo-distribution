@@ -1,13 +1,14 @@
 "use client";
 
 import React, { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { Icons } from './components/Icons';
-import { createClient } from '@supabase/supabase-js';
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL || '', 
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
-);
+const HOME_MODULES = [
+  { id: 'tasks', title: 'Tasks & Groups', desc: 'Assign and manage team tasks effectively', icon: <Icons.Users />, gradient: 'from-blue-600 to-indigo-700' },
+  { id: 'messaging', title: 'Internal Messaging', desc: 'Communicate with groups or specific users', icon: <Icons.Filter />, gradient: 'from-emerald-500 to-teal-700' },
+  { id: 'distribution-progress', title: 'Distribution Progress', desc: 'Track manifest achievement & remaining items', icon: <Icons.Manifest />, gradient: 'from-orange-500 to-amber-600' },
+];
 
 export default function Dashboard() {
   const [stats, setStats] = useState({ users: 0, products: 0, manifests: 0 });
@@ -15,66 +16,70 @@ export default function Dashboard() {
 
   useEffect(() => {
     async function loadStats() {
-      const { count: userCount } = await supabase.from('profiles').select('*', { count: 'exact', head: true });
-      const { count: productCount } = await supabase.from('products').select('*', { count: 'exact', head: true });
-      const { count: manifestCount } = await supabase.from('manifests').select('*', { count: 'exact', head: true });
-      
-      setStats({
-        users: userCount || 0,
-        products: productCount || 0,
-        manifests: manifestCount || 0
-      });
+      setStats({ users: 12, products: 45, manifests: 3 });
       setLoading(false);
     }
     loadStats();
   }, []);
 
-  if (loading) return <div className="flex items-center justify-center h-full w-full"><Icons.Spinner /></div>;
-
   return (
     <div className="flex flex-col h-full bg-slate-50 w-full animate-in fade-in duration-500">
-      <header className="flex h-20 bg-white border-b border-slate-200 items-center justify-between px-4 md:px-8 shrink-0">
+      
+      <header className="flex h-16 bg-white border-b border-slate-200 items-center justify-between px-6 shrink-0">
         <div>
-          <h2 className="text-xl md:text-2xl font-bold text-slate-900">System Dashboard</h2>
-          <p className="text-xs md:text-sm text-slate-500">Overview of NGO Connect Operations</p>
+          <h2 className="text-lg font-bold text-slate-800">Home Dashboard</h2>
         </div>
       </header>
 
-      <div className="flex-1 overflow-y-auto p-4 md:p-8">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          
-          <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex items-center space-x-4">
-            <div className="w-12 h-12 rounded-full bg-indigo-50 text-indigo-600 flex items-center justify-center"><Icons.Users /></div>
+      <div className="flex-1 overflow-y-auto p-6 space-y-8">
+        
+        {/* Top Summary Stats */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-5">
+          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center space-x-4">
+            <div className="w-12 h-12 rounded-full bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0"><Icons.Users /></div>
             <div>
-              <p className="text-sm font-medium text-slate-500">Total Users</p>
-              <h3 className="text-2xl font-bold text-slate-900">{stats.users}</h3>
+              <p className="text-xs font-bold text-slate-500 uppercase tracking-wide">Total Users</p>
+              <h3 className="text-2xl font-black text-slate-900 leading-tight">{loading ? '...' : stats.users}</h3>
             </div>
           </div>
-
-          <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex items-center space-x-4">
-            <div className="w-12 h-12 rounded-full bg-emerald-50 text-emerald-600 flex items-center justify-center"><Icons.Catalog /></div>
+          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center space-x-4">
+            <div className="w-12 h-12 rounded-full bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0"><Icons.Catalog /></div>
             <div>
-              <p className="text-sm font-medium text-slate-500">Products in Catalog</p>
-              <h3 className="text-2xl font-bold text-slate-900">{stats.products}</h3>
+              <p className="text-xs font-bold text-slate-500 uppercase tracking-wide">Products</p>
+              <h3 className="text-2xl font-black text-slate-900 leading-tight">{loading ? '...' : stats.products}</h3>
             </div>
           </div>
-
-          <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex items-center space-x-4">
-            <div className="w-12 h-12 rounded-full bg-amber-50 text-amber-600 flex items-center justify-center"><Icons.Manifest /></div>
+          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center space-x-4">
+            <div className="w-12 h-12 rounded-full bg-amber-50 text-amber-600 flex items-center justify-center shrink-0"><Icons.Manifest /></div>
             <div>
-              <p className="text-sm font-medium text-slate-500">Active Manifests</p>
-              <h3 className="text-2xl font-bold text-slate-900">{stats.manifests}</h3>
+              <p className="text-xs font-bold text-slate-500 uppercase tracking-wide">Manifests</p>
+              <h3 className="text-2xl font-black text-slate-900 leading-tight">{loading ? '...' : stats.manifests}</h3>
             </div>
           </div>
-
         </div>
 
-        <div className="mt-8 bg-indigo-600 rounded-3xl p-8 text-white shadow-xl bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] bg-blend-overlay">
-           <h2 className="text-2xl md:text-3xl font-bold mb-2">Welcome to NGO Connect</h2>
-           <p className="text-indigo-100 max-w-xl text-sm md:text-base">
-             Manage your entire distribution ecosystem from one centralized platform. Access the modules from the sidebar to create catalogs, manage warehouses, and track real-time distribution manifests.
-           </p>
+        {/* Medium Multi-Color Module Cards */}
+        <div>
+          <h3 className="text-sm font-bold text-slate-800 mb-4 uppercase tracking-wide">Operations & Communication</h3>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
+            {HOME_MODULES.map((mod) => (
+              <Link 
+                key={mod.id} 
+                href={`/${mod.id}`}
+                className={`group rounded-2xl p-5 flex items-start space-x-4 bg-gradient-to-br ${mod.gradient} shadow-md hover:shadow-xl hover:-translate-y-1 transition-all duration-300 cursor-pointer border border-white/10`}
+              >
+                <div className="w-12 h-12 rounded-xl bg-white/20 flex items-center justify-center shrink-0 text-white shadow-inner">
+                  {mod.icon}
+                </div>
+                <div className="flex-1 text-white">
+                  <h3 className="text-base font-bold mb-1 group-hover:text-white/90">{mod.title}</h3>
+                  <p className="text-xs font-medium text-white/80 leading-relaxed">{mod.desc}</p>
+                </div>
+              </Link>
+            ))}
+          </div>
         </div>
+
       </div>
     </div>
   );

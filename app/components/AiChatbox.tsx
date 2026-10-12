@@ -30,15 +30,22 @@ export default function AiChatbox() {
     setMessages(prev => [...prev, { sender: 'user', text: currentInput }]);
     setInput('');
     
-    // Mocking AI Response with RBAC awareness
+    // Mocking AI Response strictly for Analysis and Reporting
     setTimeout(() => {
-      let aiResponse = "Processing your request...";
+      let aiResponse = "Analyzing your request...";
       
-      // Simple mock logic for RBAC demonstration
-      if (currentInput.toLowerCase().includes("delete") && userRole !== 'Super Admin') {
-        aiResponse = "Access Denied: You do not have permission to delete records. Please contact a Super Admin.";
-      } else {
-        aiResponse = "I have received your command. In the final version, this will trigger the database API to execute your request.";
+      const lowerInput = currentInput.toLowerCase();
+      
+      // STRICT AI GUARDRAIL: Block Delete/Edit/Update operations
+      if (lowerInput.includes("delete") || lowerInput.includes("update") || lowerInput.includes("edit") || lowerInput.includes("remove")) {
+        aiResponse = "⚠️ Action Restricted: I am a read-only analytics AI. I cannot delete, modify, or update any system records. I can only generate reports, analyze data, and export to Excel/PDF.";
+      } 
+      // Handle Reporting / Exporting
+      else if (lowerInput.includes("export") || lowerInput.includes("pdf") || lowerInput.includes("excel")) {
+        aiResponse = "📊 Generating report format... In the final version, this will trigger an automatic download of your requested data in PDF/Excel format.";
+      }
+      else {
+        aiResponse = "I have received your query. I will pull the relevant data from the database and present the analysis for you.";
       }
 
       setMessages(prev => [...prev, { sender: 'ai', text: aiResponse }]);
@@ -88,7 +95,7 @@ export default function AiChatbox() {
                 value={input} 
                 onChange={(e) => setInput(e.target.value)} 
                 placeholder="Ask me anything..." 
-                className="flex-1 px-4 py-2 bg-slate-100 border-none rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 transition-all" 
+                className="flex-1 px-4 py-2 bg-slate-100 border border-slate-200 rounded-xl text-sm text-slate-900 outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-all" 
               />
               <button 
                 type="submit" 
