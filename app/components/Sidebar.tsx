@@ -20,10 +20,8 @@ const MAIN_MENUS = [
   { id: '/admin', label: 'Admin Panel', icon: <Icons.Users />, allowedRoles: ['Super Admin'] },
   { id: '/warehouse', label: 'Warehouse Management', icon: <Icons.Catalog /> },
   { id: '/distribution', label: 'Distribution Point', icon: <Icons.Manifest /> },
-  { id: '/reports', label: 'Report & Reconciliation', icon: <Icons.Filter /> },
-  { id: '/volunteers', label: 'Volunteer & CFW', icon: <Icons.Users /> },
-  { id: '/accessories', label: 'DP Accessories', icon: <Icons.Plus /> },
-  { id: '/incidents', label: 'Incident Report', icon: <Icons.Search /> },
+  { id: '/reporting', label: 'Report & Reconciliation', icon: <Icons.Filter /> },
+  { id: '/database-management', label: '⚠️ Database Management', icon: <Icons.Plus /> },
 ];
 
 export default function Sidebar({ isOpen, setIsOpen }: { isOpen: boolean, setIsOpen: (val: boolean) => void }) {

@@ -50,7 +50,7 @@ export default function RootLayout({
             {children}
           </div>
           
-          <AiChatbox />
+         
           
         </main>
       </body>
