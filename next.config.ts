@@ -1,17 +1,34 @@
-// next.config.ts
-import type { NextConfig } from 'next';
+import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // ১. TypeScript এরর বাইপাস (যাতে Vercel বিল্ড না থামায়)
   typescript: {
-    // !! WARN !!
-    // Dangerously allow production builds to successfully complete even if
-    // your project has type errors.
     ignoreBuildErrors: true,
   },
+  // ২. ESLint এরর বাইপাস 
   eslint: {
-    // Warning: This allows production builds to successfully complete even if
-    // your project has ESLint errors.
     ignoreDuringBuilds: true,
+  },
+  
+  // ৩. আপনার অরিজিনাল সেটিংস
+  devIndicators: {
+    // appIsrStatus: false, // এই লাইনটির কারণেই Vercel এ বিল্ড ফেইল করছিল, তাই এটি মুছে দেওয়া হয়েছে
+    buildActivity: false,
+  },
+  experimental: {
+    agentFeedback: true,
+  },
+  cacheComponents: true,
+  partialPrefetching: true,
+  
+  // ৪. আপনার Tailwind CSS সেটিংস (এটি না থাকলে লাইভ সাইটে ডিজাইন আসবে না)
+  turbopack: {
+    rules: {
+      "*.css": {
+        loaders: ["@tailwindcss/turbopack"],
+        as: "*.css",
+      },
+    },
   },
 };
 
