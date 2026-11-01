@@ -6,13 +6,14 @@ import * as XLSX from 'xlsx';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Icons } from './../../../components/Icons';
+import bcrypt from 'bcryptjs';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL || '', 
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
 );
 
-const STATUS_OPTIONS = ["Active", "Hold", "Inactive"];
+const STATUS_OPTIONS = ["Active", "Pending", "Hold", "Inactive"];
 
 export default function UserManagementPage() {
   const [users, setUsers] = useState<any[]>([]);
@@ -20,6 +21,7 @@ export default function UserManagementPage() {
   const [dps, setDps] = useState<any[]>([]);
   const [whs, setWhs] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isSavingAccess, setIsSavingAccess] = useState(false);
 
   // Filters
   const [searchTerm, setSearchTerm] = useState('');
@@ -45,12 +47,19 @@ export default function UserManagementPage() {
   const [formRole, setFormRole] = useState('');
   const [formStatus, setFormStatus] = useState('Active');
   const [formPassword, setFormPassword] = useState('');
+  const [isResetPassword, setIsResetPassword] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Facility Access Modal States (WH & DP)
   const [isFacilityModalOpen, setIsFacilityModalOpen] = useState(false);
   const [facilityUser, setFacilityUser] = useState<any>(null);
   const [selectedDPs, setSelectedDPs] = useState<string[]>([]);
   const [selectedWHs, setSelectedWHs] = useState<string[]>([]);
+
+  // Bulk Upload Preview States
+  const [isBulkPreviewOpen, setIsBulkPreviewOpen] = useState(false);
+  const [bulkUsers, setBulkUsers] = useState<any[]>([]);
+  const [isUploading, setIsUploading] = useState(false);
 
   const [msg, setMsg] = useState({ text: '', type: '' });
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -61,13 +70,12 @@ export default function UserManagementPage() {
 
   const showMessage = (text: string, type: 'success' | 'error' = 'success') => {
     setMsg({ text, type });
-    setTimeout(() => setMsg({ text: '', type: '' }), 4000);
+    setTimeout(() => setMsg({ text: '', type: '' }), 5000);
   };
 
   const fetchInitialData = async () => {
     setIsLoading(true);
     
-    // Fetch Master Data
     const [{ data: rolesData }, { data: dpData }, { data: whData }] = await Promise.all([
         supabase.from('user_roles').select('*'),
         supabase.from('distribution_points').select('id, name, code').order('name'),
@@ -81,12 +89,14 @@ export default function UserManagementPage() {
     if (dpData) setDps(dpData);
     if (whData) setWhs(whData);
 
-    // Fetch Users
+    // Fetch relational data from the new user_warehouses and user_dps tables
     const { data: usersData, error } = await supabase
       .from('profiles')
       .select(`
-        *,
-        user_roles (role_name)
+        *, 
+        user_roles (role_name),
+        user_warehouses (warehouse_id),
+        user_dps (dp_id)
       `)
       .order('created_at', { ascending: false });
       
@@ -94,13 +104,16 @@ export default function UserManagementPage() {
         showMessage(`Database Error: ${error.message}`, "error");
         setUsers([]);
     } else if (usersData) {
-        setUsers(usersData);
+        const mappedUsers = usersData.map(u => ({
+            ...u,
+            assigned_wh_ids: u.user_warehouses?.map((w: any) => w.warehouse_id) || [],
+            assigned_dp_ids: u.user_dps?.map((d: any) => d.dp_id) || []
+        }));
+        setUsers(mappedUsers);
     }
-    
     setIsLoading(false);
   };
 
-  // --- PIN VERIFICATION LOGIC ---
   const handleInitiateSecureAction = (type: string, user: any, payload?: any) => {
       setPinAction({ type, user, payload });
       setPinInput('');
@@ -111,7 +124,7 @@ export default function UserManagementPage() {
   const executeSecureAction = async () => {
       const savedPin = localStorage.getItem('db_admin_pin') || '123456';
       if (pinInput !== savedPin) {
-          alert('Incorrect Security PIN!');
+          showMessage('Incorrect Security PIN!', 'error');
           setPinInput('');
           return;
       }
@@ -141,9 +154,9 @@ export default function UserManagementPage() {
       setPinAction(null);
   };
 
-  // --- MODAL & FORM LOGIC ---
   const openModal = (editMode = false, user: any = null) => {
       setIsEditing(editMode);
+      setIsResetPassword(false);
       if (editMode && user) {
           setCurrentUserData(user);
           setFormEmail(user.email || '');
@@ -173,8 +186,16 @@ export default function UserManagementPage() {
           return;
       }
 
-      const payload = {
-          email: formEmail,
+      const isDuplicate = users.some(u => u.email.toLowerCase() === formEmail.toLowerCase() && u.id !== currentUserData?.id);
+      if (isDuplicate) {
+          showMessage("A user with this email address already exists!", "error");
+          return;
+      }
+
+      setIsSubmitting(true);
+
+      const payload: any = {
+          email: formEmail.toLowerCase(),
           full_name: formName,
           phone: formPhone,
           designation: formDesignation,
@@ -184,42 +205,49 @@ export default function UserManagementPage() {
 
       try {
           if (isEditing && currentUserData) {
+              if (isResetPassword) {
+                  if (formPassword.length < 8) {
+                      showMessage("Password must be at least 8 characters long.", "error");
+                      setIsSubmitting(false);
+                      return;
+                  }
+                  const salt = bcrypt.genSaltSync(10);
+                  payload.password_hash = bcrypt.hashSync(formPassword, salt);
+              }
+
               const { error } = await supabase.from('profiles').update(payload).eq('id', currentUserData.id);
               if (error) throw error;
               showMessage("User updated successfully!");
+              setIsModalOpen(false); // Close modal if editing
           } else {
-              if (!formPassword) { alert("Initial Password is required for new users."); return; }
-              
-              // Instead of inserting just standard fields, we omit `id` entirely from our manual insert.
-              // We also ensure password_hash is sent.
-              const insertPayload = {
-                  ...payload,
-                  password_hash: formPassword
-              };
-              
-              const { error } = await supabase.from('profiles').insert([insertPayload]);
-              
-              if (error) {
-                  // If it still complains about ID, it means the table was created without a default UUID generation 
-                  // or the trigger is missing. We can explicitly generate one here as a fallback using crypto API.
-                  if (error.code === '23502' && error.message.includes('"id"')) {
-                      const fallbackId = crypto.randomUUID();
-                      const { error: fallbackError } = await supabase.from('profiles').insert([{ id: fallbackId, ...insertPayload }]);
-                      if (fallbackError) throw fallbackError;
-                  } else {
-                      throw error;
-                  }
+              if (formPassword.length < 8) {
+                  showMessage("Password must be at least 8 characters long.", "error");
+                  setIsSubmitting(false);
+                  return;
               }
+              const salt = bcrypt.genSaltSync(10);
+              const insertPayload = {
+                  id: crypto.randomUUID(), 
+                  ...payload,
+                  password_hash: bcrypt.hashSync(formPassword, salt)
+              };
+              const { error } = await supabase.from('profiles').insert([insertPayload]);
+              if (error) throw error;
               showMessage("New user created successfully!");
+              // Clear form but don't close modal to allow continuous adding
+              setFormEmail('');
+              setFormName('');
+              setFormPhone('');
+              setFormDesignation('');
+              setFormPassword('');
           }
           fetchInitialData();
-          setIsModalOpen(false);
       } catch (err: any) {
           showMessage(err.message, "error");
       }
+      setIsSubmitting(false);
   };
 
-  // --- FACILITY ACCESS (DP & WH) LOGIC ---
   const openFacilityModal = (user: any) => {
       setFacilityUser(user);
       setSelectedDPs(user.assigned_dp_ids || []);
@@ -239,25 +267,47 @@ export default function UserManagementPage() {
 
   const handleSaveFacilities = async () => {
       if (!facilityUser) return;
+      setIsSavingAccess(true);
       try {
-          const payload = { assigned_dp_ids: selectedDPs, assigned_wh_ids: selectedWHs };
-          const { error } = await supabase.from('profiles').update(payload).eq('id', facilityUser.id);
-          if (error) throw error;
+          // 1. Delete old assignments
+          await supabase.from('user_warehouses').delete().eq('user_id', facilityUser.id);
+          await supabase.from('user_dps').delete().eq('user_id', facilityUser.id);
+
+          // 2. Insert New Assignments
+          if (selectedWHs.length > 0) {
+              const whInserts = selectedWHs.map(whId => ({ user_id: facilityUser.id, warehouse_id: whId }));
+              const { error: whErr } = await supabase.from('user_warehouses').insert(whInserts);
+              if (whErr) throw whErr;
+          }
+
+          if (selectedDPs.length > 0) {
+              const dpInserts = selectedDPs.map(dpId => ({ user_id: facilityUser.id, dp_id: dpId }));
+              const { error: dpErr } = await supabase.from('user_dps').insert(dpInserts);
+              if (dpErr) throw dpErr;
+          }
           
-          setUsers(users.map(u => u.id === facilityUser.id ? { ...u, ...payload } : u));
-          showMessage("Facility access updated successfully!");
+          setUsers(users.map(u => u.id === facilityUser.id ? { 
+              ...u, 
+              assigned_dp_ids: selectedDPs, 
+              assigned_wh_ids: selectedWHs 
+          } : u));
+          
+          showMessage("Facility access saved securely to database!");
           setIsFacilityModalOpen(false);
       } catch (err: any) {
           showMessage(err.message, "error");
       }
+      setIsSavingAccess(false);
   };
 
-
-  // --- BULK UPLOAD & TEMPLATE ---
   const handleDownloadTemplate = () => {
       const templateData = [{
-          "Email": "user1@example.com", "Full Name": "John Doe", "Designation": "Field Officer", "Phone": "+8801700000000",
-          "Role Name": roles.length > 0 ? roles[0].role_name : "Field Worker", "Initial Password": "Password@123"
+          "Email Address": "user1@example.com",
+          "Full Name": "John Doe",
+          "Designation": "Field Officer",
+          "Phone Number": "01700000000",
+          "Role Name": roles.length > 0 ? roles[0].role_name : "Field Worker",
+          "Initial Password": "Password@123"
       }];
       const worksheet = XLSX.utils.json_to_sheet(templateData);
       worksheet['!cols'] = [ {wch: 25}, {wch: 20}, {wch: 20}, {wch: 15}, {wch: 20}, {wch: 20} ];
@@ -277,36 +327,113 @@ export default function UserManagementPage() {
               const wb = XLSX.read(bstr, { type: 'binary' });
               const data: any[] = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
 
-              if (data.length === 0) return;
-              let successCount = 0; let errorCount = 0;
-
-              for (const row of data) {
-                  const roleObj = roles.find(r => r.role_name.toLowerCase() === (row['Role Name'] || '').toString().toLowerCase());
-                  if (!row['Email'] || !row['Full Name']) { errorCount++; continue; }
-
-                  const payload = {
-                      id: crypto.randomUUID(), // Force ID generation for bulk as well to bypass constraint issues
-                      email: row['Email'], full_name: row['Full Name'], designation: row['Designation'] || null,
-                      phone: row['Phone'] || null, role_id: roleObj ? roleObj.id : null, status: 'Active'
-                  };
-                  const { error } = await supabase.from('profiles').insert([payload]);
-                  if (error) errorCount++; else successCount++;
+              if (data.length === 0) {
+                  showMessage("Excel file is empty.", "error");
+                  return;
               }
-              fetchInitialData();
-              showMessage(`Bulk upload complete! ${successCount} added, ${errorCount} failed.`);
-          } catch (error) { showMessage("Failed to process Excel file.", "error"); }
+
+              const parsedUsers = data.map((row: any, idx: number) => {
+                  const email = (row['Email Address'] || '').toString().trim().toLowerCase();
+                  const fullName = (row['Full Name'] || '').toString().trim();
+                  const pass = (row['Initial Password'] || '').toString();
+                  const roleName = (row['Role Name'] || '').toString().trim();
+
+                  if (!email || !fullName) return null;
+
+                  const existingUser = users.find(u => u.email.toLowerCase() === email);
+                  const roleObj = roles.find(r => r.role_name.toLowerCase() === roleName.toLowerCase());
+
+                  let errorMsg = null;
+                  if (!existingUser && pass.length < 8) errorMsg = "Min 8 chars pass required";
+                  if (!roleObj) errorMsg = "Role not found in DB";
+
+                  return {
+                      _ui_id: idx,
+                      email: email,
+                      full_name: fullName,
+                      designation: row['Designation'] || null,
+                      phone: row['Phone Number'] || null,
+                      role_id: roleObj ? roleObj.id : null,
+                      role_name: roleObj ? roleObj.role_name : 'Invalid Role',
+                      password_hash: pass,
+                      status: 'Active',
+                      is_existing: !!existingUser,
+                      existing_id: existingUser ? existingUser.id : null,
+                      action: existingUser ? 'Skip' : (errorMsg ? 'Skip' : 'Insert'),
+                      has_error: errorMsg
+                  };
+              }).filter(Boolean);
+
+              setBulkUsers(parsedUsers);
+              setIsBulkPreviewOpen(true);
+          } catch (error) { 
+              showMessage("Failed to process Excel file.", "error"); 
+          }
           if (fileInputRef.current) fileInputRef.current.value = '';
       };
       reader.readAsBinaryString(file);
   };
 
-  // --- EXPORT LIST ---
+  const toggleBulkAction = (index: number, newAction: string) => {
+      const updated = [...bulkUsers];
+      updated[index].action = newAction;
+      setBulkUsers(updated);
+  };
+
+  const removeBulkRow = (index: number) => {
+      const updated = [...bulkUsers];
+      updated.splice(index, 1);
+      setBulkUsers(updated);
+  };
+
+  const handleConfirmBulkUpload = async () => {
+      setIsUploading(true);
+      let successCount = 0;
+      let errorCount = 0;
+      let updateCount = 0;
+
+      for (const row of bulkUsers) {
+          if (row.action === 'Skip' || row.has_error) continue;
+
+          const payload = {
+              email: row.email,
+              full_name: row.full_name,
+              designation: row.designation,
+              phone: row.phone,
+              role_id: row.role_id,
+              status: row.status
+          };
+
+          if (row.action === 'Update' && row.is_existing) {
+              const { error } = await supabase.from('profiles').update(payload).eq('id', row.existing_id);
+              if (error) errorCount++;
+              else updateCount++;
+          } else if (row.action === 'Insert') {
+              const salt = bcrypt.genSaltSync(10);
+              const insertPayload = {
+                  id: crypto.randomUUID(),
+                  ...payload,
+                  password_hash: bcrypt.hashSync(row.password_hash, salt)
+              };
+              const { error } = await supabase.from('profiles').insert([insertPayload]);
+              if (error) errorCount++;
+              else successCount++;
+          }
+      }
+      
+      fetchInitialData();
+      setIsUploading(false);
+      setIsBulkPreviewOpen(false);
+      showMessage(`Bulk Upload Complete! Inserted: ${successCount}, Updated: ${updateCount}, Failed: ${errorCount}`);
+  };
+
   const getFilteredUsers = () => {
       return users.filter(u => {
           const matchRole = filterRole === 'ALL' || u.role_id === filterRole;
           const matchStatus = filterStatus === 'ALL' || u.status === filterStatus;
           const matchSearch = u.full_name?.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                              u.email?.toLowerCase().includes(searchTerm.toLowerCase()) || u.phone?.includes(searchTerm);
+                              u.email?.toLowerCase().includes(searchTerm.toLowerCase()) || 
+                              u.phone?.includes(searchTerm);
           return matchRole && matchStatus && matchSearch;
       });
   };
@@ -344,152 +471,189 @@ export default function UserManagementPage() {
 
   const getStatusBadge = (status: string) => {
       if (status === 'Active') return <span className="bg-emerald-100 text-emerald-700 border border-emerald-200 px-2 py-0.5 rounded text-[10px] font-black uppercase">Active</span>;
+      if (status === 'Pending') return <span className="bg-slate-100 text-slate-400 border border-slate-200 px-2 py-0.5 rounded text-[10px] font-black uppercase">Pending</span>;
       if (status === 'Hold') return <span className="bg-amber-100 text-amber-700 border border-amber-200 px-2 py-0.5 rounded text-[10px] font-black uppercase">On Hold</span>;
-      return <span className="bg-slate-100 text-slate-600 border border-slate-200 px-2 py-0.5 rounded text-[10px] font-black uppercase">Inactive</span>;
+      return <span className="bg-rose-50 text-rose-600 border border-rose-200 px-2 py-0.5 rounded text-[10px] font-black uppercase">Inactive</span>;
   };
 
   return (
-    <div className="flex flex-col h-full bg-slate-50 w-full animate-in fade-in duration-500 overflow-hidden relative">
-      
-      <header className="flex h-20 bg-white border-b border-slate-200 items-center px-4 md:px-6 shrink-0 shadow-sm z-10 justify-between">
-        <div className="flex items-center">
-            <button onClick={() => window.history.back()} className="mr-3 md:mr-4 p-2 rounded-full hover:bg-slate-100 text-slate-600 transition-colors flex items-center justify-center">
-               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" /></svg>
-            </button>
-            <div>
-              <h1 className="text-lg md:text-xl font-black text-slate-900 tracking-tight">User Management</h1>
-              <p className="text-[10px] md:text-xs font-bold text-slate-500 uppercase tracking-widest mt-0.5 hidden sm:block">Accounts & Security Controls</p>
-            </div>
-        </div>
-        <div className="mr-14 md:mr-24 shrink-0">
-          <button onClick={() => openModal()} className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-3 md:py-2.5 md:px-5 rounded-lg md:rounded-xl text-xs md:text-sm shadow-md transition-all flex items-center whitespace-nowrap">
-              <span className="mr-1.5 md:mr-2 text-base md:text-lg">+</span> Manual Add
-          </button>
+    <div className="flex flex-col h-full w-full bg-slate-50 relative animate-in fade-in">
+      <header className="flex h-20 bg-white border-b border-slate-200 items-center px-6 shrink-0 z-20 shadow-sm">
+        <div>
+          <h2 className="text-xl md:text-2xl font-bold text-slate-900">User Management & Security</h2>
+          <p className="text-xs text-slate-500">Create users, encrypt passwords, and assign access</p>
         </div>
       </header>
 
-      <main className="flex-1 overflow-hidden p-4 md:p-6 flex flex-col relative z-0">
+      <div className="flex-1 p-4 md:p-6 grid grid-cols-1 xl:grid-cols-12 gap-6 overflow-y-auto">
+        
         {msg.text && (
-          <div className={`absolute top-6 left-1/2 -translate-x-1/2 z-50 p-4 rounded-xl shadow-lg border text-sm font-bold flex items-center animate-in slide-in-from-top-4 ${msg.type === 'error' ? 'bg-rose-50 text-rose-700 border-rose-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'}`}>
+          <div className={`fixed top-24 left-1/2 -translate-x-1/2 z-50 p-4 rounded-xl shadow-lg border text-sm font-bold animate-in slide-in-from-top-2 flex items-center ${msg.type === 'error' ? 'bg-rose-50 text-rose-700 border-rose-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'}`}>
             <span className="mr-2 text-lg">{msg.type === 'error' ? '⚠️' : '✅'}</span> {msg.text}
           </div>
         )}
 
-        <div className="flex flex-col h-full bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
-           
-           <div className="p-5 border-b border-slate-100 bg-slate-50/50 flex flex-col xl:flex-row justify-between xl:items-center gap-4 shrink-0">
-               <div className="flex flex-wrap items-center gap-3">
-                   <button onClick={handleDownloadTemplate} className="bg-white border border-slate-300 text-slate-700 hover:bg-slate-100 font-bold py-2 px-4 rounded-xl text-xs shadow-sm flex items-center transition-colors">
-                      <Icons.Download /> <span className="ml-2">Excel Template</span>
+        {/* --- LEFT: Create User Form --- */}
+        <div className="xl:col-span-4 bg-white p-6 md:p-8 rounded-2xl border border-slate-200 shadow-sm h-fit">
+          <h3 className="text-lg font-black text-slate-900 mb-6">Create New User</h3>
+          <form onSubmit={handleSaveUser} className="space-y-5">
+            <div>
+              <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5">Full Name *</label>
+              <input type="text" value={formName} onChange={e => setFormName(e.target.value)} required className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl text-sm text-slate-900 font-bold outline-none focus:border-indigo-500 shadow-sm transition-colors" />
+            </div>
+            
+            <div>
+              <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5">Designation</label>
+              <input type="text" value={formDesignation} onChange={e => setFormDesignation(e.target.value)} placeholder="e.g. DP Manager" className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl text-sm text-slate-900 font-bold outline-none focus:border-indigo-500 shadow-sm transition-colors" />
+            </div>
+
+            <div>
+              <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5">Email Address *</label>
+              <input type="email" value={formEmail} onChange={e => setFormEmail(e.target.value)} required className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl text-sm text-slate-900 font-bold outline-none focus:border-indigo-500 shadow-sm transition-colors" />
+            </div>
+
+            <div>
+              <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 flex justify-between">
+                <span>Secure Password *</span>
+                <span className="text-rose-500 lowercase normal-case font-medium">Min 8 chars</span>
+              </label>
+              <input type="password" value={formPassword} onChange={e => setFormPassword(e.target.value)} required minLength={8} placeholder="Min 8 chars, hashed on save" className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl text-sm text-slate-900 font-bold outline-none focus:border-indigo-500 shadow-sm transition-colors" />
+            </div>
+
+            <div>
+              <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5">User Role *</label>
+              <select value={formRole} onChange={e => setFormRole(e.target.value)} required className="w-full px-4 py-3 bg-indigo-50 border border-indigo-200 rounded-xl text-sm font-bold text-indigo-900 outline-none focus:border-indigo-500 shadow-sm transition-colors">
+                <option value="" disabled>-- Select Role --</option>
+                {roles.map(r => <option key={r.id} value={r.id}>{r.role_name}</option>)}
+              </select>
+            </div>
+            
+            <button type="submit" disabled={isSubmitting} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-black py-4 rounded-xl text-sm transition-all shadow-md mt-6 disabled:opacity-50">
+              {isSubmitting ? 'Encrypting & Saving...' : 'Create Secured User'}
+            </button>
+          </form>
+        </div>
+
+        {/* --- RIGHT: User List Table --- */}
+        <div className="xl:col-span-8 bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col h-full min-h-[600px]">
+          
+          {/* Table Header & Filters */}
+          <div className="p-4 border-b border-slate-100 bg-slate-50/80 flex flex-col md:flex-row justify-between md:items-center gap-4 shrink-0">
+               
+               {/* Upload & Download Buttons */}
+               <div className="flex flex-wrap items-center gap-2">
+                   <button onClick={handleDownloadTemplate} className="bg-white border border-slate-300 text-slate-700 hover:bg-slate-100 font-bold py-2.5 px-4 rounded-xl text-xs shadow-sm flex items-center transition-colors h-10">
+                      <Icons.Download /> <span className="ml-2 hidden sm:block">Excel Template</span>
                    </button>
                    <div className="relative">
                       <input type="file" accept=".xlsx, .xls, .csv" className="hidden" ref={fileInputRef} onChange={handleFileUpload} />
-                      <button onClick={() => fileInputRef.current?.click()} className="bg-slate-800 hover:bg-slate-900 text-white font-bold py-2 px-4 rounded-xl text-xs shadow-sm flex items-center transition-colors">
-                         <span className="mr-2 text-base">📤</span> Bulk Upload
+                      <button onClick={() => fileInputRef.current?.click()} className="bg-slate-800 hover:bg-slate-900 text-white font-bold py-2.5 px-4 rounded-xl text-xs shadow-sm flex items-center transition-colors h-10">
+                         <span className="mr-2 text-base">📤</span> <span className="hidden sm:block">Bulk Upload</span>
                       </button>
                    </div>
                </div>
 
+               {/* Right Side Filters */}
                <div className="flex flex-wrap items-center gap-3">
-                   <select value={filterRole} onChange={(e) => setFilterRole(e.target.value)} className="px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-bold text-slate-700 outline-none focus:border-indigo-500 shadow-sm w-32">
+                   <select value={filterRole} onChange={(e) => setFilterRole(e.target.value)} className="px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-bold text-slate-700 outline-none focus:border-indigo-500 shadow-sm h-10 w-full sm:w-auto">
                       <option value="ALL">All Roles</option>
                       {roles.map(r => <option key={r.id} value={r.id}>{r.role_name}</option>)}
                    </select>
-                   <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} className="px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-bold text-slate-700 outline-none focus:border-indigo-500 shadow-sm w-28">
+                   <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} className="px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-bold text-slate-700 outline-none focus:border-indigo-500 shadow-sm h-10 w-full sm:w-auto">
                       <option value="ALL">All Status</option>
                       {STATUS_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
                    </select>
-                   <input type="text" placeholder="Search users..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="px-4 py-2 w-full sm:w-64 bg-white border border-slate-300 rounded-lg text-xs font-bold text-slate-900 outline-none focus:border-indigo-500 shadow-sm" />
-                   <div className="flex space-x-2 xl:border-l border-slate-200 xl:pl-3">
-                      <button onClick={handleExportExcel} disabled={filteredUsers.length === 0} className="px-3 py-2 bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-bold rounded-lg hover:bg-emerald-100 transition-colors shadow-sm disabled:opacity-50">Excel</button>
-                      <button onClick={handleExportPDF} disabled={filteredUsers.length === 0} className="px-3 py-2 bg-rose-50 text-rose-700 border border-rose-200 text-xs font-bold rounded-lg hover:bg-rose-100 transition-colors shadow-sm disabled:opacity-50">PDF</button>
+                   <input type="text" placeholder="Search users..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="px-4 py-2 w-full sm:w-48 lg:w-64 bg-white border border-slate-300 rounded-lg text-xs font-bold text-slate-900 outline-none focus:border-indigo-500 shadow-sm h-10" />
+                   
+                   <div className="flex space-x-2">
+                      <button onClick={handleExportExcel} disabled={filteredUsers.length === 0} className="px-3 py-2 bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-bold rounded-lg hover:bg-emerald-100 transition-colors shadow-sm disabled:opacity-50 h-10 flex items-center"><span className="hidden sm:block">Excel</span><span className="sm:hidden"><Icons.Download/></span></button>
+                      <button onClick={handleExportPDF} disabled={filteredUsers.length === 0} className="px-3 py-2 bg-rose-50 text-rose-700 border border-rose-200 text-xs font-bold rounded-lg hover:bg-rose-100 transition-colors shadow-sm disabled:opacity-50 h-10 flex items-center"><span className="hidden sm:block">PDF</span><span className="sm:hidden"><Icons.Download/></span></button>
                    </div>
                </div>
            </div>
 
-           <div className="flex-1 overflow-auto custom-scrollbar">
-              <table className="w-full text-left border-collapse min-w-[1000px]">
-                 <thead className="bg-slate-100/80 border-b border-slate-200 sticky top-0 z-10 shadow-sm">
-                    <tr>
-                       <th className="p-4 text-[10px] font-black text-slate-500 uppercase tracking-wider">User Info & Designation</th>
-                       <th className="p-4 text-[10px] font-black text-slate-500 uppercase tracking-wider">Contact</th>
-                       <th className="p-4 text-[10px] font-black text-slate-500 uppercase tracking-wider">Role & Access</th>
-                       <th className="p-4 text-[10px] font-black text-slate-500 uppercase tracking-wider">Status</th>
-                       <th className="p-4 text-[10px] font-black text-slate-500 uppercase tracking-wider text-right pr-6">Actions</th>
-                    </tr>
-                 </thead>
-                 <tbody className="divide-y divide-slate-100 bg-white">
-                    {isLoading ? (
-                       <tr><td colSpan={5} className="p-10 text-center text-slate-400 font-bold">Loading DB Profiles...</td></tr>
-                    ) : filteredUsers.length === 0 ? (
-                       <tr><td colSpan={5} className="p-10 text-center text-slate-400 font-bold">No users found.</td></tr>
-                    ) : (
-                       filteredUsers.map(user => (
-                          <tr key={user.id} className="hover:bg-slate-50/80 transition-colors group">
-                             <td className="p-4">
-                                <div className="flex items-center space-x-3">
-                                   <div className="w-10 h-10 rounded-full bg-gradient-to-br from-indigo-500 to-cyan-600 flex items-center justify-center text-white font-bold text-sm shadow-sm shrink-0">
-                                      {user.full_name ? user.full_name.charAt(0).toUpperCase() : (user.email ? user.email.charAt(0).toUpperCase() : 'U')}
-                                   </div>
-                                   <div>
-                                      <p className="font-bold text-slate-900 text-sm leading-tight">{user.full_name || 'N/A'}</p>
-                                      <p className="text-xs text-slate-500 mt-0.5">{user.designation || <span className="italic opacity-50">No Designation</span>}</p>
-                                   </div>
-                                </div>
-                             </td>
-                             <td className="p-4">
-                                <p className="font-mono text-xs font-bold text-slate-600">{user.phone || '-'}</p>
-                                <p className="text-[10px] text-slate-400 mt-0.5">{user.email}</p>
-                             </td>
-                             <td className="p-4">
-                                <div className="flex flex-col items-start space-y-1.5">
-                                   <span className="bg-indigo-50 text-indigo-700 border border-indigo-100 px-2.5 py-1 rounded-lg text-xs font-bold whitespace-nowrap">
-                                      {user.user_roles?.role_name || 'Unassigned Role'}
-                                   </span>
-                                   <div className="flex space-x-2 text-[9px] font-bold text-slate-500 uppercase tracking-wide mt-1">
-                                      <span>{user.assigned_dp_ids?.length || 0} DPs</span>
-                                      <span className="text-slate-300">|</span>
-                                      <span>{user.assigned_wh_ids?.length || 0} WHs</span>
-                                   </div>
-                                </div>
-                             </td>
-                             <td className="p-4">
-                                {getStatusBadge(user.status || 'Active')}
-                             </td>
-                             <td className="p-4 text-right pr-6">
-                                <div className="flex items-center justify-end space-x-2">
-                                   <div className="flex space-x-1 mr-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                                      {user.status !== 'Active' && <button onClick={() => handleInitiateSecureAction('STATUS', user, 'Active')} className="px-2 py-1 bg-emerald-50 text-emerald-700 border border-emerald-200 text-[10px] font-bold rounded hover:bg-emerald-100 transition-colors">Active</button>}
-                                      {user.status !== 'Hold' && <button onClick={() => handleInitiateSecureAction('STATUS', user, 'Hold')} className="px-2 py-1 bg-amber-50 text-amber-700 border border-amber-200 text-[10px] font-bold rounded hover:bg-amber-100 transition-colors">Hold</button>}
-                                      {user.status !== 'Inactive' && <button onClick={() => handleInitiateSecureAction('STATUS', user, 'Inactive')} className="px-2 py-1 bg-slate-100 text-slate-600 border border-slate-200 text-[10px] font-bold rounded hover:bg-slate-200 transition-colors">Inactive</button>}
-                                   </div>
-                                   
-                                   {/* FACILITY ACCESS BUTTON */}
-                                   <button onClick={() => openFacilityModal(user)} className="px-3 py-1.5 bg-slate-800 text-white text-[10px] font-bold rounded-lg hover:bg-slate-900 transition-colors shadow-sm flex items-center" title="Manage Warehouse & DP Access">
-                                      🏢 Facilities
-                                   </button>
-                                   
-                                   <button onClick={() => handleInitiateSecureAction('EDIT_OPEN', user)} className="p-2 text-amber-500 hover:bg-amber-50 rounded-lg border border-transparent hover:border-amber-200 transition-colors" title="Edit User"><Icons.Edit /></button>
-                                   <button onClick={() => handleInitiateSecureAction('DELETE', user)} className="p-2 text-rose-500 hover:bg-rose-50 rounded-lg border border-transparent hover:border-rose-200 transition-colors" title="Delete User"><Icons.Trash /></button>
-                                </div>
-                             </td>
-                          </tr>
-                       ))
-                    )}
-                 </tbody>
-              </table>
-           </div>
+          {/* User Table */}
+          <div className="overflow-x-auto w-full flex-1 custom-scrollbar">
+            <table className="w-full text-left border-collapse min-w-[800px]">
+               <thead className="bg-slate-50 border-b border-slate-200 sticky top-0 z-10 shadow-sm">
+                 <tr>
+                   <th className="p-4 text-[10px] font-black text-slate-500 uppercase tracking-wider">User Details</th>
+                   <th className="p-4 text-[10px] font-black text-slate-500 uppercase tracking-wider text-center">Role & Facilities</th>
+                   <th className="p-4 text-[10px] font-black text-slate-500 uppercase tracking-wider text-center">Status</th>
+                   <th className="p-4 text-[10px] font-black text-slate-500 uppercase tracking-wider text-right pr-6">Actions</th>
+                 </tr>
+               </thead>
+               <tbody className="divide-y divide-slate-100 bg-white">
+                 {isLoading ? (
+                    <tr><td colSpan={4} className="p-10 text-center"><Icons.Spinner /></td></tr>
+                 ) : filteredUsers.length === 0 ? (
+                    <tr><td colSpan={4} className="p-10 text-center text-slate-400 font-bold">No users found matching criteria.</td></tr>
+                 ) : (
+                    filteredUsers.map(user => (
+                      <tr key={user.id} className="hover:bg-slate-50/80 transition-colors group">
+                         <td className="p-4">
+                            <div className="flex items-center space-x-4">
+                               <div className="w-10 h-10 rounded-full bg-gradient-to-br from-indigo-500 to-cyan-600 flex items-center justify-center text-white font-bold text-sm shadow-sm shrink-0">
+                                  {user.full_name ? user.full_name.charAt(0).toUpperCase() : (user.email ? user.email.charAt(0).toUpperCase() : 'U')}
+                               </div>
+                               <div>
+                                  <p className="font-bold text-slate-900 text-sm leading-tight">{user.full_name || 'N/A'}</p>
+                                  <p className="text-xs text-slate-500 mt-1">{user.designation || <span className="italic opacity-50">No Designation</span>}</p>
+                                  <p className="text-[10px] text-slate-400 font-mono mt-0.5">{user.email} {user.phone ? `| ${user.phone}` : ''}</p>
+                               </div>
+                            </div>
+                         </td>
+                         <td className="p-4 text-center">
+                            <div className="flex flex-col items-center justify-center space-y-2">
+                               <span className="bg-indigo-50 text-indigo-700 border border-indigo-100 px-3 py-1 rounded-lg text-xs font-bold whitespace-nowrap">
+                                  {user.user_roles?.role_name || 'Unassigned Role'}
+                               </span>
+                               <div className="flex items-center space-x-2 text-[10px] font-bold text-slate-500 uppercase tracking-widest whitespace-nowrap">
+                                  <span>{user.assigned_dp_ids?.length || 0} DPs</span>
+                                  <span className="text-slate-300">|</span>
+                                  <span>{user.assigned_wh_ids?.length || 0} WHs</span>
+                               </div>
+                            </div>
+                         </td>
+                         <td className="p-4 text-center whitespace-nowrap">
+                            {getStatusBadge(user.status || 'Active')}
+                         </td>
+                         <td className="p-4 text-right pr-6 whitespace-nowrap">
+                            <div className="flex items-center justify-end space-x-2">
+                               
+                               {/* Status Modifiers (Hover visible) */}
+                               <div className="flex space-x-1 mr-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                                  {user.status !== 'Active' && <button onClick={() => handleInitiateSecureAction('STATUS', user, 'Active')} className="px-2 py-1 bg-emerald-50 text-emerald-700 border border-emerald-200 text-[10px] font-bold rounded hover:bg-emerald-100 transition-colors">Active</button>}
+                                  {user.status !== 'Pending' && <button onClick={() => handleInitiateSecureAction('STATUS', user, 'Pending')} className="px-2 py-1 bg-slate-100 text-slate-500 border border-slate-200 text-[10px] font-bold rounded hover:bg-slate-200 transition-colors">Pending</button>}
+                                  {user.status !== 'Hold' && <button onClick={() => handleInitiateSecureAction('STATUS', user, 'Hold')} className="px-2 py-1 bg-amber-50 text-amber-700 border border-amber-200 text-[10px] font-bold rounded hover:bg-amber-100 transition-colors">Hold</button>}
+                                  {user.status !== 'Inactive' && <button onClick={() => handleInitiateSecureAction('STATUS', user, 'Inactive')} className="px-2 py-1 bg-rose-50 text-rose-600 border border-rose-200 text-[10px] font-bold rounded hover:bg-rose-100 transition-colors">Inactive</button>}
+                               </div>
+                               
+                               <button onClick={() => openFacilityModal(user)} className="px-3 py-2 bg-slate-800 text-white text-[10px] font-bold rounded-lg hover:bg-slate-900 transition-colors shadow-sm flex items-center" title="Manage Warehouse & DP Access">
+                                  🏢 Facilities
+                               </button>
+                               
+                               <button onClick={() => handleInitiateSecureAction('EDIT_OPEN', user)} className="p-2 text-amber-500 hover:bg-amber-50 rounded-lg border border-transparent hover:border-amber-200 transition-colors" title="Edit User"><Icons.Edit /></button>
+                               <button onClick={() => handleInitiateSecureAction('DELETE', user)} className="p-2 text-rose-500 hover:bg-rose-50 rounded-lg border border-transparent hover:border-rose-200 transition-colors" title="Delete User"><Icons.Trash /></button>
+                            </div>
+                         </td>
+                      </tr>
+                    ))
+                 )}
+               </tbody>
+            </table>
+          </div>
         </div>
-      </main>
+      </div>
 
-      {/* ---------------- MANUAL ADD / EDIT MODAL ---------------- */}
-      {isModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
+      {/* ---------------- EDIT MODAL (Separate from Create Form) ---------------- */}
+      {isModalOpen && isEditing && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
           <div className="bg-white w-full max-w-md rounded-3xl shadow-2xl overflow-hidden flex flex-col animate-in zoom-in-95">
             <div className="p-5 border-b border-slate-200 bg-slate-50 flex justify-between items-center shrink-0">
               <div>
-                <h3 className="font-black text-lg text-slate-900">{isEditing ? 'Edit User Details' : 'Register New User'}</h3>
-                {isEditing && <p className="text-xs text-slate-500 mt-1">{currentUserData?.email}</p>}
+                <h3 className="font-black text-lg text-slate-900">Edit User Details</h3>
+                <p className="text-xs text-slate-500 mt-1">{currentUserData?.email}</p>
               </div>
               <button onClick={() => setIsModalOpen(false)} className="p-2 bg-white border border-slate-200 text-slate-500 rounded-xl hover:bg-slate-100"><Icons.Close /></button>
             </div>
@@ -497,7 +661,7 @@ export default function UserManagementPage() {
             <form onSubmit={handleSaveUser} className="p-6 space-y-4 max-h-[75vh] overflow-y-auto custom-scrollbar">
                <div>
                  <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Email Address *</label>
-                 <input type="email" value={formEmail} onChange={(e) => setFormEmail(e.target.value)} required disabled={isEditing} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 font-bold outline-none focus:border-indigo-500 disabled:opacity-60 shadow-sm" />
+                 <input type="email" value={formEmail} disabled className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 font-bold outline-none disabled:opacity-60 shadow-sm" />
                </div>
                
                <div>
@@ -525,23 +689,30 @@ export default function UserManagementPage() {
 
                <div>
                  <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Assigned Role *</label>
-                 <select value={formRole} onChange={(e) => setFormRole(e.target.value)} required className="w-full px-4 py-3 bg-indigo-50 border border-indigo-200 rounded-xl text-sm text-indigo-900 font-bold outline-none focus:border-indigo-500 shadow-sm">
+                 <select value={formRole || ''} onChange={(e) => setFormRole(e.target.value)} required className="w-full px-4 py-3 bg-indigo-50 border border-indigo-200 rounded-xl text-sm text-indigo-900 font-bold outline-none focus:border-indigo-500 shadow-sm">
+                   <option value="" disabled>-- Select Role --</option>
                    {roles.map(r => <option key={r.id} value={r.id}>{r.role_name}</option>)}
                  </select>
                </div>
                
-               {!isEditing && (
+               <div className="pt-2 border-t border-slate-100">
+                  <label className="flex items-center space-x-2 cursor-pointer mb-3">
+                     <input type="checkbox" checked={isResetPassword} onChange={(e) => setIsResetPassword(e.target.checked)} className="w-4 h-4 accent-rose-600 rounded" />
+                     <span className="text-xs font-bold text-rose-600">Hard Reset Password</span>
+                  </label>
+               </div>
+
+               {isResetPassword && (
                  <div>
                    <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5 flex justify-between">
-                      Initial Password *
-                      <span className="text-rose-500 lowercase normal-case font-medium">Must ask user to change later</span>
+                      New Password * <span className="text-rose-500 lowercase normal-case font-medium">Min 8 chars</span>
                    </label>
-                   <input type="password" value={formPassword} onChange={(e) => setFormPassword(e.target.value)} required={!isEditing} className="w-full px-4 py-3 bg-white border border-slate-300 rounded-xl text-sm text-slate-900 font-bold outline-none focus:border-indigo-500 shadow-sm" />
+                   <input type="password" value={formPassword} onChange={(e) => setFormPassword(e.target.value)} required minLength={8} className="w-full px-4 py-3 bg-white border border-slate-300 rounded-xl text-sm text-slate-900 font-bold outline-none focus:border-indigo-500 shadow-sm" />
                  </div>
                )}
                
-               <button type="submit" className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-black py-4 rounded-xl text-sm transition-all shadow-lg flex justify-center items-center mt-6">
-                 {isEditing ? '💾 Save User Configuration' : 'Create New User Account'}
+               <button type="submit" disabled={isSubmitting} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-black py-4 rounded-xl text-sm transition-all shadow-lg flex justify-center items-center mt-6 disabled:opacity-50">
+                 {isSubmitting ? 'Saving...' : '💾 Save User Configuration'}
                </button>
             </form>
           </div>
@@ -550,7 +721,7 @@ export default function UserManagementPage() {
 
       {/* ---------------- FACILITY ACCESS MODAL (DP & WH) ---------------- */}
       {isFacilityModalOpen && facilityUser && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/70 backdrop-blur-sm p-4">
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/70 backdrop-blur-sm p-4">
           <div className="bg-white w-full max-w-4xl rounded-3xl shadow-2xl overflow-hidden flex flex-col h-[85vh] animate-in zoom-in-95">
              <div className="p-5 border-b border-slate-200 bg-slate-900 text-white flex justify-between items-center shrink-0">
                <div>
@@ -620,9 +791,94 @@ export default function UserManagementPage() {
 
              <div className="p-4 border-t border-slate-200 bg-white flex justify-end shrink-0">
                  <button onClick={() => setIsFacilityModalOpen(false)} className="px-6 py-3 font-bold text-slate-500 hover:text-slate-700 hover:bg-slate-100 rounded-xl mr-3 transition-colors">Cancel</button>
-                 <button onClick={handleSaveFacilities} className="px-8 py-3 font-black text-white bg-slate-900 hover:bg-indigo-600 rounded-xl shadow-md transition-all flex items-center">
-                    💾 Save Facility Access
+                 <button disabled={isSavingAccess} onClick={handleSaveFacilities} className="px-8 py-3 font-black text-white bg-slate-900 hover:bg-indigo-600 rounded-xl shadow-md transition-all flex items-center disabled:opacity-50">
+                    {isSavingAccess ? '💾 Saving...' : '💾 Save Facility Access'}
                  </button>
+             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---------------- BULK UPLOAD PREVIEW MODAL ---------------- */}
+      {isBulkPreviewOpen && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/70 backdrop-blur-md p-4">
+          <div className="bg-white w-full max-w-5xl rounded-3xl shadow-2xl overflow-hidden flex flex-col h-[85vh] animate-in zoom-in-95">
+             <div className="p-5 border-b border-slate-200 bg-slate-900 text-white flex justify-between items-center shrink-0">
+               <div>
+                  <h3 className="font-black text-lg">Bulk Upload Preview</h3>
+                  <p className="text-xs font-medium mt-1 text-slate-400">Review users before inserting them into the database.</p>
+               </div>
+               <button onClick={() => setIsBulkPreviewOpen(false)} className="p-2 bg-slate-800 text-slate-400 rounded-xl hover:bg-rose-500 hover:text-white transition-colors"><Icons.Close /></button>
+             </div>
+
+             <div className="flex-1 overflow-y-auto p-4 custom-scrollbar bg-slate-50">
+                <table className="w-full text-left border-collapse bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden min-w-[700px]">
+                   <thead className="bg-slate-100 border-b border-slate-200">
+                      <tr>
+                         <th className="p-3 text-[10px] font-black text-slate-500 uppercase">Status</th>
+                         <th className="p-3 text-[10px] font-black text-slate-500 uppercase">User Info</th>
+                         <th className="p-3 text-[10px] font-black text-slate-500 uppercase">Role</th>
+                         <th className="p-3 text-[10px] font-black text-slate-500 uppercase">Error/Validation</th>
+                         <th className="p-3 text-[10px] font-black text-slate-500 uppercase text-right">Action</th>
+                      </tr>
+                   </thead>
+                   <tbody className="divide-y divide-slate-100">
+                      {bulkUsers.map((row, idx) => (
+                         <tr key={idx} className={row.is_existing ? 'bg-amber-50/30' : ''}>
+                            <td className="p-3">
+                               {row.is_existing ? 
+                                  <span className="bg-amber-100 text-amber-700 px-2 py-1 rounded text-[10px] font-bold">Existing</span> : 
+                                  <span className="bg-emerald-100 text-emerald-700 px-2 py-1 rounded text-[10px] font-bold">New</span>}
+                            </td>
+                            <td className="p-3">
+                               <p className="font-bold text-sm text-slate-800">{row.full_name}</p>
+                               <p className="text-xs text-slate-500">{row.email}</p>
+                            </td>
+                            <td className="p-3 text-xs font-bold text-slate-600">{row.role_name}</td>
+                            <td className="p-3">
+                               {row.has_error ? 
+                                  <span className="text-rose-600 font-bold text-[10px]">{row.has_error}</span> : 
+                                  <span className="text-emerald-600 font-bold text-[10px]">Valid</span>}
+                            </td>
+                            <td className="p-3 text-right">
+                               <div className="flex justify-end items-center space-x-2">
+                                  {row.is_existing && !row.has_error && (
+                                     <select 
+                                       value={row.action} 
+                                       onChange={(e) => toggleBulkAction(idx, e.target.value)}
+                                       className="text-xs border border-slate-300 rounded px-2 py-1 bg-white font-bold text-slate-700 outline-none"
+                                     >
+                                        <option value="Skip">Skip</option>
+                                        <option value="Update">Update</option>
+                                     </select>
+                                  )}
+                                  {(!row.is_existing && !row.has_error) && (
+                                     <span className="text-xs font-bold text-indigo-600 px-2 py-1 bg-indigo-50 rounded">Insert</span>
+                                  )}
+                                  <button onClick={() => removeBulkRow(idx)} className="text-rose-400 hover:text-rose-600 ml-2" title="Remove from list"><Icons.Trash /></button>
+                               </div>
+                            </td>
+                         </tr>
+                      ))}
+                   </tbody>
+                </table>
+             </div>
+
+             <div className="p-4 border-t border-slate-200 bg-white flex justify-between items-center shrink-0">
+                 <div className="text-xs font-bold text-slate-500">
+                    Valid to Insert: {bulkUsers.filter(u => u.action === 'Insert' && !u.has_error).length} | 
+                    Update: {bulkUsers.filter(u => u.action === 'Update' && !u.has_error).length}
+                 </div>
+                 <div className="flex space-x-3">
+                   <button onClick={() => setIsBulkPreviewOpen(false)} className="px-6 py-2.5 font-bold text-slate-600 hover:bg-slate-100 rounded-xl transition-colors">Cancel</button>
+                   <button 
+                     onClick={handleConfirmBulkUpload} 
+                     disabled={isUploading || bulkUsers.filter(u => u.action !== 'Skip' && !u.has_error).length === 0}
+                     className="px-8 py-2.5 font-black text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl shadow-md transition-all disabled:opacity-50"
+                   >
+                      {isUploading ? 'Uploading...' : 'Confirm & Upload'}
+                   </button>
+                 </div>
              </div>
           </div>
         </div>
@@ -630,7 +886,7 @@ export default function UserManagementPage() {
 
       {/* ---------------- SECURE PIN PROMPT MODAL ---------------- */}
       {isPinModalOpen && pinAction && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/80 backdrop-blur-md p-4">
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/80 backdrop-blur-md p-4">
           <div className="bg-white w-full max-w-sm rounded-3xl shadow-2xl overflow-hidden flex flex-col animate-in zoom-in-95 duration-200">
              <div className={`p-6 border-b flex justify-between items-center ${pinAction.type === 'DELETE' ? 'bg-rose-50 border-rose-100' : 'bg-slate-50 border-slate-200'}`}>
                <div>

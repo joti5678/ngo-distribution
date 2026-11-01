@@ -1,8 +1,9 @@
 "use client";
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Icons } from './../../components/Icons';
 import { createClient } from '@supabase/supabase-js';
+import * as XLSX from 'xlsx';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL || '', 
@@ -19,6 +20,12 @@ export default function WarehouseSetupPage() {
   const [locationName, setLocationName] = useState('');
   const [gpsCoordinates, setGpsCoordinates] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
+
+  // Bulk Upload States
+  const [isBulkPreviewOpen, setIsBulkPreviewOpen] = useState(false);
+  const [bulkData, setBulkData] = useState<any[]>([]);
+  const [invalidRows, setInvalidRows] = useState<any[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     fetchWarehouses();
@@ -44,6 +51,7 @@ export default function WarehouseSetupPage() {
       if (!error) {
          setWarehouses(warehouses.map(w => w.id === editingId ? { ...w, name, code, location_name: locationName, gps_coordinates: gpsCoordinates } : w));
          resetForm();
+         alert("Warehouse updated successfully!");
       } else {
          alert("Failed to update. Error: " + error.message);
       }
@@ -61,6 +69,7 @@ export default function WarehouseSetupPage() {
       if (!error && data) {
         setWarehouses([data[0], ...warehouses]);
         resetForm();
+        alert("Warehouse created successfully!");
       } else {
         alert("Failed to add warehouse. Error: " + (error?.message || "Unknown error"));
       }
@@ -80,47 +89,149 @@ export default function WarehouseSetupPage() {
   };
 
   const handleDelete = async (id: string) => {
-    if(!confirm("Are you sure? Deleting this might break connections if it has products.")) return;
+    if(!confirm("Are you sure? Deleting this might break connections if it has assigned users or products.")) return;
     const { error } = await supabase.from('warehouses').delete().eq('id', id);
-    if (!error) setWarehouses(warehouses.filter(w => w.id !== id));
+    if (!error) {
+        setWarehouses(warehouses.filter(w => w.id !== id));
+        alert("Warehouse deleted!");
+    } else {
+        alert("Delete failed: " + error.message);
+    }
+  };
+
+  // --- NEW EXCEL BULK UPLOAD LOGIC ---
+  const downloadDemoExcel = () => {
+    const ws = XLSX.utils.json_to_sheet([
+        { "Warehouse Name": "Central WH Dhaka", "Warehouse Code": "CWH-DHK-01", "Location": "Mirpur", "GPS": "23.81, 90.41" },
+        { "Warehouse Name": "Regional WH Chittagong", "Warehouse Code": "RWH-CTG-02", "Location": "Halishahar", "GPS": "22.33, 91.81" }
+    ]);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Warehouses");
+    XLSX.writeFile(wb, "Warehouse_Upload_Format.xlsx");
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const data = new Uint8Array(event.target?.result as ArrayBuffer);
+        const workbook = XLSX.read(data, { type: 'array' });
+        const sheetName = workbook.SheetNames[0];
+        const sheet = workbook.Sheets[sheetName];
+        const rows: any[] = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+
+        const validItems: any[] = [];
+        const invalidItems: any[] = [];
+
+        rows.forEach((row: any, index: number) => {
+          const wName = (row["Warehouse Name"] || row["name"] || "").toString().trim();
+          const wCode = (row["Warehouse Code"] || row["code"] || "").toString().trim();
+          const wLoc = (row["Location"] || row["location"] || "").toString().trim();
+          const wGps = (row["GPS"] || row["gps"] || "").toString().trim();
+
+          if (!wName || !wCode) {
+              invalidItems.push({ row: index + 2, details: `Name: ${wName}, Code: ${wCode}`, error: "Name and Code are required" });
+              return;
+          }
+          
+          if (warehouses.some(w => w.code.toLowerCase() === wCode.toLowerCase())) {
+              invalidItems.push({ row: index + 2, details: `Code: ${wCode}`, error: "Duplicate code in database" });
+              return;
+          }
+
+          validItems.push({ name: wName, code: wCode, location_name: wLoc, gps_coordinates: wGps });
+        });
+
+        setBulkData(validItems);
+        setInvalidRows(invalidItems);
+        setIsBulkPreviewOpen(true);
+
+      } catch (err) {
+        alert("Failed to read Excel file. Please use the demo format.");
+      }
+    };
+    reader.readAsArrayBuffer(file);
+    if (fileInputRef.current) fileInputRef.current.value = ''; 
+  };
+
+  const confirmBulkUpload = async () => {
+    setIsLoading(true);
+    // Removed status: 'Active' since the column does not exist in the database
+    const inserts = bulkData.map(item => ({
+        name: item.name,
+        code: item.code,
+        location_name: item.location_name,
+        gps_coordinates: item.gps_coordinates
+    }));
+
+    const { data, error } = await supabase.from('warehouses').insert(inserts).select();
+    
+    if (error) {
+        alert("Error inserting data: " + error.message);
+    } else if (data) {
+        alert(`${data.length} Warehouses added successfully!`);
+        setWarehouses([...data, ...warehouses]);
+        setIsBulkPreviewOpen(false);
+        setBulkData([]);
+    }
+    setIsLoading(false);
   };
 
   return (
     <div className="flex flex-col h-full w-full animate-in fade-in duration-500">
-      <header className="flex h-20 bg-white border-b border-slate-200 items-center justify-between px-6 shrink-0">
-        <div>
-          <h2 className="text-xl md:text-2xl font-bold text-slate-800">Warehouse Setup</h2>
-          <p className="text-sm text-slate-500">Configure central and regional storage facilities</p>
+      <header className="flex h-20 bg-white border-b border-slate-200 items-center justify-between px-4 md:px-6 shrink-0 shadow-sm z-10">
+        <div className="flex items-center">
+          <button onClick={() => window.history.back()} className="mr-4 p-2 rounded-full hover:bg-slate-100 text-slate-600 transition-colors flex items-center justify-center">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" /></svg>
+          </button>
+          <div>
+            <h2 className="text-xl md:text-2xl font-bold text-slate-800">Warehouse Setup</h2>
+            <p className="text-sm text-slate-500 hidden md:block">Configure central and regional storage facilities</p>
+          </div>
+        </div>
+
+        {/* Excel Upload Buttons */}
+        <div className="flex space-x-2">
+            <button onClick={downloadDemoExcel} className="hidden sm:flex bg-white border border-slate-300 text-slate-600 hover:bg-slate-50 font-bold py-2 px-3 rounded-lg text-xs shadow-sm items-center transition-colors">
+                <Icons.Download /> <span className="ml-1">Demo Format</span>
+            </button>
+            <button onClick={() => fileInputRef.current?.click()} className="bg-rose-600 hover:bg-rose-700 text-white font-bold py-2 px-4 rounded-lg text-xs shadow-sm flex items-center transition-colors">
+                <span className="mr-1 text-base">📊</span> Bulk Upload
+            </button>
+            <input type="file" ref={fileInputRef} onChange={handleFileUpload} accept=".xlsx, .xls" className="hidden" />
         </div>
       </header>
 
-      <div className="flex-1 overflow-y-auto p-6 grid grid-cols-1 xl:grid-cols-3 gap-6">
+      <div className="flex-1 overflow-y-auto p-4 md:p-6 grid grid-cols-1 xl:grid-cols-3 gap-6">
         
         {/* Form Column */}
         <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm xl:col-span-1 h-fit">
           <h3 className="text-lg font-bold text-slate-800 mb-5 flex items-center">
             <div className="w-8 h-8 rounded-lg bg-rose-50 text-rose-600 flex items-center justify-center mr-3"><Icons.Upload /></div>
-            Add Warehouse
+            {editingId ? 'Edit Warehouse' : 'Add Warehouse'}
           </h3>
           <form onSubmit={handleAddWarehouse} className="space-y-4">
             <div>
-              <label className="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1">Warehouse Name</label>
-              <input type="text" value={name} onChange={(e) => setName(e.target.value)} required className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 outline-none focus:border-rose-500 transition-colors" placeholder="e.g. Central WH Dhaka" />
+              <label className="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1">Warehouse Name *</label>
+              <input type="text" value={name} onChange={(e) => setName(e.target.value)} required className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 outline-none focus:border-rose-500 transition-colors font-bold" placeholder="e.g. Central WH Dhaka" />
             </div>
             <div>
-              <label className="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1">Warehouse Code</label>
-              <input type="text" value={code} onChange={(e) => setCode(e.target.value)} required className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 outline-none focus:border-rose-500 transition-colors" placeholder="e.g. CWH-DHK-01" />
+              <label className="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1">Warehouse Code *</label>
+              <input type="text" value={code} onChange={(e) => setCode(e.target.value)} required className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 outline-none focus:border-rose-500 transition-colors font-bold" placeholder="e.g. CWH-DHK-01" />
             </div>
             <div>
-              <label className="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1">Camp/Location Name</label>
+              <label className="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1">Location Name</label>
               <input type="text" value={locationName} onChange={(e) => setLocationName(e.target.value)} className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 outline-none focus:border-rose-500 transition-colors" placeholder="e.g. Mirpur Sector 10" />
             </div>
             <div>
-              <label className="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1">Warehouse Point GPS</label>
+              <label className="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1">GPS Coordinates</label>
               <input type="text" value={gpsCoordinates} onChange={(e) => setGpsCoordinates(e.target.value)} className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 outline-none focus:border-rose-500 transition-colors" placeholder="e.g. 23.8103, 90.4125" />
             </div>
             <button type="submit" className="w-full bg-gradient-to-r from-rose-500 to-red-600 text-white py-3 rounded-xl text-sm font-bold shadow-md hover:shadow-lg transition-all mt-2">
-              {editingId ? 'Update Warehouse' : 'Save Warehouse'}
+              {editingId ? '💾 Update Warehouse' : '✅ Save Warehouse'}
             </button>
             {editingId && (
               <button type="button" onClick={resetForm} className="w-full bg-slate-100 text-slate-600 py-3 rounded-xl text-sm font-bold shadow-sm hover:bg-slate-200 transition-all mt-2">
@@ -132,9 +243,9 @@ export default function WarehouseSetupPage() {
 
         {/* List Column */}
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm xl:col-span-2 overflow-hidden flex flex-col">
-          <div className="overflow-x-auto w-full">
+          <div className="overflow-x-auto w-full custom-scrollbar">
             <table className="w-full text-left border-collapse min-w-[600px]">
-              <thead className="bg-slate-50 border-b border-slate-200">
+              <thead className="bg-slate-50 border-b border-slate-200 sticky top-0">
                 <tr>
                   <th className="p-4 text-xs font-bold text-slate-500 uppercase">Warehouse Details</th>
                   <th className="p-4 text-xs font-bold text-slate-500 uppercase">Location & GPS</th>
@@ -144,31 +255,31 @@ export default function WarehouseSetupPage() {
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {isLoading ? (
-                  <tr><td colSpan={4} className="p-8 text-center"><Icons.Spinner /></td></tr>
+                  <tr><td colSpan={4} className="p-10 text-center"><Icons.Spinner /></td></tr>
                 ) : warehouses.length === 0 ? (
-                  <tr><td colSpan={4} className="p-8 text-center text-sm text-slate-500">No warehouses configured yet.</td></tr>
+                  <tr><td colSpan={4} className="p-10 text-center text-sm text-slate-500 font-bold">No warehouses configured yet.</td></tr>
                 ) : (
                   warehouses.map(w => (
                     <tr key={w.id} className="hover:bg-slate-50 group transition-colors">
                       <td className="p-4">
                         <p className="font-bold text-slate-900">{w.name}</p>
-                        <p className="text-xs text-slate-500 font-mono mt-0.5">Code: {w.code}</p>
+                        <p className="text-xs text-rose-600 font-mono font-bold mt-0.5">Code: {w.code}</p>
                       </td>
                       <td className="p-4 text-sm text-slate-700">
-                        <p className="font-medium">{w.location_name || 'N/A'}</p>
-                        <p className="text-xs text-slate-400 mt-0.5">{w.gps_coordinates || 'No GPS'}</p>
+                        <p className="font-bold">{w.location_name || 'N/A'}</p>
+                        <p className="text-[10px] text-slate-400 mt-0.5">{w.gps_coordinates || 'No GPS'}</p>
                       </td>
                       <td className="p-4">
-                        <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-bold border bg-emerald-50 text-emerald-700 border-emerald-200">
-                          <span className="w-1.5 h-1.5 rounded-full mr-2 bg-emerald-500"></span>
-                          {w.status || 'Active'}
+                        <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-bold border bg-emerald-50 text-emerald-700 border-emerald-200 uppercase">
+                          <span className="w-1.5 h-1.5 rounded-full mr-1.5 bg-emerald-500"></span>
+                          Active
                         </span>
                       </td>
                       <td className="p-4 text-right space-x-2">
-                        <button onClick={() => handleEdit(w)} className="p-2 text-indigo-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors" title="Edit">
+                        <button onClick={() => handleEdit(w)} className="p-2 text-indigo-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors border border-transparent hover:border-indigo-100" title="Edit">
                           <Icons.Edit />
                         </button>
-                        <button onClick={() => handleDelete(w.id)} className="p-2 text-rose-400 hover:text-rose-600 hover:bg-rose-50 rounded-xl transition-colors" title="Delete">
+                        <button onClick={() => handleDelete(w.id)} className="p-2 text-rose-400 hover:text-rose-600 hover:bg-rose-50 rounded-xl transition-colors border border-transparent hover:border-rose-100" title="Delete">
                           <Icons.Trash />
                         </button>
                       </td>
@@ -181,6 +292,78 @@ export default function WarehouseSetupPage() {
         </div>
 
       </div>
+
+      {/* --- EXCEL PREVIEW MODAL --- */}
+      {isBulkPreviewOpen && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-slate-900/70 backdrop-blur-sm p-4">
+          <div className="bg-white w-full max-w-2xl rounded-2xl shadow-2xl overflow-hidden flex flex-col h-[80vh] animate-in zoom-in-95 duration-200">
+            <div className="p-5 border-b border-slate-200 bg-slate-50 flex justify-between items-center shrink-0">
+              <div>
+                <h3 className="font-black text-slate-900 text-lg">Excel Import Validation</h3>
+                <p className="text-[10px] text-slate-500 font-bold mt-1 uppercase tracking-widest">{bulkData.length} Valid | {invalidRows.length} Invalid</p>
+              </div>
+              <button onClick={() => setIsBulkPreviewOpen(false)} className="text-slate-400 hover:text-slate-700 bg-white p-2 rounded-lg border border-slate-200 shadow-sm"><Icons.Close /></button>
+            </div>
+            
+            <div className="flex-1 overflow-y-auto p-6 bg-slate-50 custom-scrollbar space-y-6">
+                
+                {invalidRows.length > 0 && (
+                    <div className="bg-rose-50 border border-rose-200 rounded-xl overflow-hidden shadow-sm">
+                        <div className="bg-rose-100 px-4 py-2 font-bold text-[10px] text-rose-800 uppercase border-b border-rose-200 flex justify-between">Errors Found (Will be ignored)</div>
+                        <ul className="p-4 space-y-2 text-xs font-medium text-rose-600">
+                            {invalidRows.map((err, i) => (
+                                <li key={i} className="flex space-x-2">
+                                    <span className="font-bold">Row {err.row}:</span>
+                                    <span>{err.details}</span>
+                                    <span className="text-rose-400">- {err.error}</span>
+                                </li>
+                            ))}
+                        </ul>
+                    </div>
+                )}
+
+                {bulkData.length > 0 ? (
+                    <div className="border border-emerald-200 rounded-xl overflow-hidden bg-white shadow-sm">
+                        <div className="bg-emerald-50 px-4 py-2 font-bold text-[10px] text-emerald-800 uppercase border-b border-emerald-100 flex justify-between">
+                            <span>Valid Warehouses Ready to Add</span>
+                            <span>{bulkData.length} Items</span>
+                        </div>
+                        <div className="overflow-x-auto">
+                            <table className="w-full text-left border-collapse min-w-[500px]">
+                                <thead className="bg-slate-50 text-[10px] uppercase font-bold text-slate-500 border-b border-slate-200">
+                                    <tr>
+                                        <th className="px-4 py-2">Name</th>
+                                        <th className="px-4 py-2">Code</th>
+                                        <th className="px-4 py-2">Location</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                    {bulkData.map((item, idx) => (
+                                        <tr key={idx} className="hover:bg-slate-50">
+                                            <td className="px-4 py-2 text-xs font-bold text-slate-800">{item.name}</td>
+                                            <td className="px-4 py-2 font-mono font-bold text-xs text-rose-600">{item.code}</td>
+                                            <td className="px-4 py-2 text-xs font-medium text-slate-600">{item.location_name || '-'}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                ) : (
+                    <div className="text-center p-10 text-slate-400 font-bold border-2 border-dashed border-slate-200 rounded-xl">No valid warehouses found in the file.</div>
+                )}
+            </div>
+
+            <div className="p-5 border-t border-slate-200 bg-white shrink-0 flex justify-end space-x-3">
+                <button onClick={() => setIsBulkPreviewOpen(false)} className="px-6 py-2.5 rounded-xl border border-slate-300 text-slate-600 font-bold hover:bg-slate-50 transition-colors text-sm">Cancel</button>
+                <button onClick={confirmBulkUpload} disabled={bulkData.length === 0 || isLoading} className="px-6 py-2.5 rounded-xl bg-rose-600 text-white font-bold hover:bg-rose-700 shadow-md transition-colors text-sm disabled:opacity-50 flex items-center">
+                    {isLoading ? <Icons.Spinner /> : `Save ${bulkData.length} Warehouses`}
+                </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }

@@ -58,39 +58,82 @@ export default function GapDamagePage() {
   const [selectedTxnDetails, setSelectedTxnDetails] = useState<any>(null);
 
   useEffect(() => {
-    supabase.auth.getUser().then(({ data: { user } }) => {
-      if (user) setCurrentUser(user);
-    });
-
-    const today = new Date();
-    const dateStr = new Date(today.getTime() - (today.getTimezoneOffset() * 60000)).toISOString().split('T')[0];
-    setEntryDate(dateStr);
-
     fetchInitialData();
   }, []);
 
   const fetchInitialData = async () => {
     setIsLoading(true);
-    const { data: whData } = await supabase.from('warehouses').select('id, name, code').order('name');
-    if (whData) setWarehouses(whData);
+    try {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user) setCurrentUser(user);
+        
+        const sessionStr = localStorage.getItem('user_session');
+        const sessionUser = sessionStr ? JSON.parse(sessionStr) : null;
+        const roleName = (sessionUser?.user_roles?.role_name || '').toUpperCase();
+        const isSuperAdmin = roleName.includes('SUPER ADMIN') || roleName === 'ADMIN' || roleName.includes('WEB ADMIN');
 
-    await loadDamageLogs();
+        // Bulletproof Logic for Fetching assigned_wh_ids
+        let rawIds = sessionUser?.assigned_wh_ids;
+        if (!rawIds && user?.id) {
+            const { data: pData } = await supabase.from('profiles').select('assigned_wh_ids').eq('id', user.id).single();
+            if (pData?.assigned_wh_ids) rawIds = pData.assigned_wh_ids;
+            else {
+                const { data: uData } = await supabase.from('users').select('assigned_wh_ids').eq('id', user.id).single();
+                if (uData?.assigned_wh_ids) rawIds = uData.assigned_wh_ids;
+            }
+        }
+        if (!rawIds && user?.user_metadata?.assigned_wh_ids) {
+            rawIds = user.user_metadata.assigned_wh_ids;
+        }
+
+        let assignedIds: string[] = [];
+        if (typeof rawIds === 'string') {
+            try { assignedIds = JSON.parse(rawIds); } 
+            catch { assignedIds = rawIds.split(','); }
+        } else if (Array.isArray(rawIds)) {
+            assignedIds = rawIds;
+        } else if (rawIds && typeof rawIds === 'object') {
+            assignedIds = Object.values(rawIds);
+        }
+        assignedIds = assignedIds.map(id => String(id).trim()).filter(id => id !== '');
+
+        const today = new Date();
+        const dateStr = new Date(today.getTime() - (today.getTimezoneOffset() * 60000)).toISOString().split('T')[0];
+        setEntryDate(dateStr);
+
+        const { data: whData } = await supabase.from('warehouses').select('id, name, code').order('name');
+        
+        if (whData) {
+            if (isSuperAdmin) {
+                setWarehouses(whData);
+            } else {
+                setWarehouses(whData.filter(w => assignedIds.includes(String(w.id))));
+            }
+        }
+
+        let logsQuery = supabase
+          .from('inventory_transactions')
+          .select(`
+            *,
+            warehouses (name, code),
+            products (name, code, unit_type, product_type)
+          `)
+          .eq('transaction_type', 'DAMAGE');
+
+        if (!isSuperAdmin && assignedIds.length > 0) {
+            logsQuery = logsQuery.in('warehouse_id', assignedIds);
+        } else if (!isSuperAdmin && assignedIds.length === 0) {
+            logsQuery = logsQuery.eq('warehouse_id', 'none'); 
+        }
+
+        const { data: logsData } = await logsQuery.order('created_at', { ascending: false }).limit(100);
+
+        if (logsData) setDamageLogs(logsData);
+        
+    } catch (err) {
+        console.error("Error fetching gap data:", err);
+    }
     setIsLoading(false);
-  };
-
-  const loadDamageLogs = async () => {
-    const { data } = await supabase
-      .from('inventory_transactions')
-      .select(`
-        *,
-        warehouses (name, code),
-        products (name, code, unit_type, product_type)
-      `)
-      .eq('transaction_type', 'DAMAGE')
-      .order('created_at', { ascending: false })
-      .limit(100);
-
-    if (data) setDamageLogs(data);
   };
 
   const showMessage = (text: string, type: 'success' | 'error' = 'success') => {
@@ -196,7 +239,7 @@ export default function GapDamagePage() {
       setRemarks('');
       setReferenceNo('');
       fetchAvailableStock(selectedWh);
-      await loadDamageLogs();
+      await fetchInitialData();
 
     } catch (err: any) {
       showMessage(`Failed to record loss: ${err.message}`, "error");
@@ -240,7 +283,7 @@ export default function GapDamagePage() {
 
     setIsSubmitting(true);
     try {
-      const diff = newQty - editingTxn.quantity; // Positive means more damage (deduct more), Negative means less damage (return to stock)
+      const diff = newQty - editingTxn.quantity; 
 
       const { data: invRecord } = await supabase
         .from('inventory')
@@ -268,7 +311,7 @@ export default function GapDamagePage() {
       showMessage("Record updated and stock adjusted!", "success");
       setEditModalOpen(false);
       if (selectedWh === editingTxn.warehouse_id) fetchAvailableStock(selectedWh);
-      await loadDamageLogs();
+      await fetchInitialData();
 
     } catch (err: any) {
       showMessage(`Update failed: ${err.message}`, "error");
@@ -307,7 +350,7 @@ export default function GapDamagePage() {
       showMessage("Incident record deleted and stock restored to warehouse!", "success");
       setRevertModalOpen(false);
       if (selectedWh === txnToRevert.warehouse_id) fetchAvailableStock(selectedWh);
-      await loadDamageLogs();
+      await fetchInitialData();
 
     } catch (err: any) {
       showMessage(`Revert failed: ${err.message}`, "error");
@@ -445,7 +488,11 @@ export default function GapDamagePage() {
             <div>
               <label className="block text-xs font-bold text-rose-600 uppercase tracking-wide mb-1.5">Select Warehouse</label>
               <select value={selectedWh} onChange={(e) => setSelectedWh(e.target.value)} className="w-full px-4 py-2.5 bg-rose-50/50 border border-rose-200 rounded-xl text-sm text-slate-900 font-bold outline-none focus:border-rose-500">
-                <option value="">-- Choose Affected Warehouse --</option>
+                {warehouses.length === 0 ? (
+                    <option value="">-- No Assigned Warehouses --</option>
+                ) : (
+                    <option value="">-- Choose Affected Warehouse --</option>
+                )}
                 {warehouses.map(w => <option key={w.id} value={w.id}>[{w.code}] {w.name}</option>)}
               </select>
             </div>

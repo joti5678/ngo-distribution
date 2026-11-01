@@ -23,22 +23,27 @@ export default function ManifestsPage() {
   const [allPackages, setAllPackages] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
-  // Dynamic Manifest Types State (Strictly Database Driven)
+  // Dynamic Manifest Types State
   const [manifestTypes, setManifestTypes] = useState<any[]>([]);
   const [isManageTypesOpen, setIsManageTypesOpen] = useState(false);
   const [newTypeName, setNewTypeName] = useState('');
   const [editingType, setEditingType] = useState<string | null>(null);
   const [editTypeValue, setEditTypeValue] = useState('');
   
-  // Security PIN State for Types
+  // Security PIN
   const [isPinPromptOpen, setIsPinPromptOpen] = useState(false);
   const [pinInput, setPinInput] = useState('');
 
   // Filters
   const [filterDp, setFilterDp] = useState('ALL');
-  const [filterMonth, setFilterMonth] = useState(''); 
+  const [filterMonth, setFilterMonth] = useState(''); // Removed default filter to show all
   const [filterType, setFilterType] = useState('ALL'); 
   const [searchTerm, setSearchTerm] = useState('');
+
+  // Pagination States
+  const [activePage, setActivePage] = useState(1);
+  const [inactivePage, setInactivePage] = useState(1);
+  const MANIFESTS_PER_PAGE = 5;
 
   // Form States (Create)
   const [manifestCode, setManifestCode] = useState(''); 
@@ -80,14 +85,15 @@ export default function ManifestsPage() {
   const [msg, setMsg] = useState({ text: '', type: '' });
 
   useEffect(() => {
-    const today = new Date();
-    const yyyy = today.getFullYear();
-    const mm = String(today.getMonth() + 1).padStart(2, '0');
-    setFilterMonth(`${yyyy}-${mm}`);
-
     fetchInitialData();
     generateAutoCode();
   }, []);
+
+  // Reset pagination when filters change
+  useEffect(() => {
+    setActivePage(1);
+    setInactivePage(1);
+  }, [filterDp, filterMonth, filterType, searchTerm]);
 
   const showMessage = (text: string, type: 'success' | 'error' = 'success') => {
     setMsg({ text, type });
@@ -104,36 +110,62 @@ export default function ManifestsPage() {
     setIsLoading(true);
     await loadManifestTypes();
 
-    const { data: { user } } = await supabase.auth.getUser();
-    let profileData: any = null;
-    if (user) {
-      setCurrentUser(user);
-      const { data: prof } = await supabase.from('profiles').select('*').eq('id', user.id).single();
-      if (prof) profileData = prof;
-    }
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) setCurrentUser(user);
 
-    const { data: dpData } = await supabase.from('distribution_points').select('id, name, code').order('name');
-    let allowedDps = dpData || [];
-    
-    if (profileData && profileData.role !== 'Super Admin' && Array.isArray(profileData.assigned_dp_ids) && profileData.assigned_dp_ids.length > 0) {
-      allowedDps = allowedDps.filter(dp => profileData.assigned_dp_ids.includes(dp.id));
+      const sessionStr = localStorage.getItem('user_session');
+      const sessionUser = sessionStr ? JSON.parse(sessionStr) : null;
+      
+      let profile = null;
+      if (user) {
+          const { data } = await supabase.from('profiles').select('*').eq('id', user.id).single();
+          profile = data;
+      }
+
+      // STRICT Exact Match for Super Admin to avoid false positives with names like "Distribution Admin"
+      const roleStr = String(profile?.role || sessionUser?.role || '').toUpperCase();
+      const isSuperAdmin = roleStr === 'SUPER ADMIN' || roleStr === 'ADMIN';
+
+      const { data: dpData } = await supabase.from('distribution_points').select('id, name, code').order('name');
+      const allDps = dpData || [];
+      let allowedDps = [];
+
+      if (isSuperAdmin) {
+          allowedDps = allDps;
+      } else {
+          let rawIds = profile?.assigned_dp_ids || sessionUser?.assigned_dp_ids || [];
+          let dpIds: string[] = [];
+
+          if (typeof rawIds === 'string') {
+              try { 
+                  dpIds = JSON.parse(rawIds); 
+              } catch { 
+                  dpIds = rawIds.includes(',') ? rawIds.split(',') : [rawIds]; 
+              }
+          } else if (Array.isArray(rawIds)) {
+              dpIds = rawIds;
+          } else if (rawIds && typeof rawIds === 'object') {
+              dpIds = Object.values(rawIds);
+          }
+
+          const cleanDpIds = dpIds.map(id => String(id).trim()).filter(id => id !== '');
+          allowedDps = allDps.filter(dp => cleanDpIds.includes(String(dp.id).trim()));
+      }
+
+      setDistributionPoints(allowedDps);
+      const idsToFetch = allowedDps.length > 0 ? allowedDps.map(dp => dp.id) : ['NONE-NO-ACCESS'];
+      await loadManifests(idsToFetch);
+
+    } catch (err) {
+      console.error("Error fetching DP assignment:", err);
     }
-    
-    setDistributionPoints(allowedDps);
-    await loadManifests(allowedDps.map(dp => dp.id));
     setIsLoading(false);
   };
 
   const loadManifestTypes = async () => {
      const { data, error } = await supabase.from('manifest_types').select('*').order('sort_order');
-     
-     if (error) {
-         console.error("Error loading manifest types:", error);
-         showMessage("Database table 'manifest_types' not found or RLS is blocking access!", "error");
-         return;
-     }
-
-     if (data) {
+     if (!error && data) {
          setManifestTypes(data);
          const activeTypes = data.filter(t => t.is_active !== false);
          if (activeTypes.length > 0) setManifestType(activeTypes[0].name);
@@ -161,35 +193,22 @@ export default function ManifestsPage() {
 
       if (existingType) {
           if (existingType.is_active === false) {
-              // Reactivate existing inactive type
               const { error } = await supabase.from('manifest_types').update({ is_active: true }).eq('id', existingType.id);
-              if (error) {
-                  showMessage(`Error activating type: ${error.message}`, "error");
-                  return;
+              if (!error) {
+                  const updatedTypes = manifestTypes.map(t => t.id === existingType.id ? { ...t, is_active: true } : t);
+                  setManifestTypes(updatedTypes);
+                  setManifestType(existingType.name);
+                  setNewTypeName('');
+                  showMessage(`"${typeName}" has been reactivated successfully!`);
               }
-              const updatedTypes = manifestTypes.map(t => t.id === existingType.id ? { ...t, is_active: true } : t);
-              setManifestTypes(updatedTypes);
-              setManifestType(existingType.name);
-              setNewTypeName('');
-              showMessage(`"${typeName}" was inactive and has been reactivated successfully!`);
-          } else {
-              alert('This Type already exists and is active!');
-          }
+          } else alert('This Type already exists and is active!');
           return;
       }
       
-      // If truly new, Insert it
       const newOrder = manifestTypes.length;
-      const newTypeObj = { name: typeName, sort_order: newOrder, is_active: true };
+      const { data, error } = await supabase.from('manifest_types').insert([{ name: typeName, sort_order: newOrder, is_active: true }]).select();
       
-      const { data, error } = await supabase.from('manifest_types').insert([newTypeObj]).select();
-      
-      if (error) {
-          showMessage(`Error adding type: ${error.message}`, "error");
-          return;
-      }
-      
-      if (data && data.length > 0) {
+      if (!error && data && data.length > 0) {
           setManifestTypes([...manifestTypes, data[0]]);
           setManifestType(data[0].name);
           setNewTypeName('');
@@ -199,54 +218,37 @@ export default function ManifestsPage() {
   
   const handleEditManifestType = async (id: string) => {
       if (!editTypeValue.trim()) return;
-      
       const { error } = await supabase.from('manifest_types').update({ name: editTypeValue }).eq('id', id);
       
-      if (error) {
-          showMessage(`Error: ${error.message}`, "error");
-          return;
+      if (!error) {
+          const updatedTypes = manifestTypes.map(t => t.id === id ? { ...t, name: editTypeValue } : t);
+          setManifestTypes(updatedTypes);
+          if (manifestType === manifestTypes.find(t => t.id === id)?.name) setManifestType(editTypeValue);
+          setEditingType(null);
+          showMessage(`Type updated successfully!`);
       }
-
-      const updatedTypes = manifestTypes.map(t => t.id === id ? { ...t, name: editTypeValue } : t);
-      setManifestTypes(updatedTypes);
-      
-      if (manifestType === manifestTypes.find(t => t.id === id)?.name) {
-          setManifestType(editTypeValue);
-      }
-      setEditingType(null);
-      showMessage(`Type updated successfully!`);
   };
 
   const handleToggleTypeStatus = async (id: string, currentStatus: boolean) => {
       const newStatus = !currentStatus;
       const { error } = await supabase.from('manifest_types').update({ is_active: newStatus }).eq('id', id);
-      
-      if (error) {
-          showMessage(`Error: ${error.message}`, "error");
-          return;
+      if (!error) {
+          setManifestTypes(manifestTypes.map(t => t.id === id ? { ...t, is_active: newStatus } : t));
       }
-
-      const updatedTypes = manifestTypes.map(t => t.id === id ? { ...t, is_active: newStatus } : t);
-      setManifestTypes(updatedTypes);
   };
 
   const handleDeleteManifestType = async (id: string, typeName: string) => {
-      if(!confirm(`Hard delete "${typeName}"? If this is used in old records, it's safer to just set it to 'Inactive'. Proceed with hard delete?`)) return;
-      
+      if(!confirm(`Hard delete "${typeName}"? Proceed with caution.`)) return;
       const { error } = await supabase.from('manifest_types').delete().eq('id', id);
-      if (error) {
-          showMessage(`Error: ${error.message}`, "error");
-          return;
+      if (!error) {
+          const newTypes = manifestTypes.filter(t => t.id !== id);
+          setManifestTypes(newTypes);
+          if (manifestType === typeName) {
+              const activeTypes = newTypes.filter(t => t.is_active);
+              setManifestType(activeTypes.length > 0 ? activeTypes[0].name : '');
+          }
+          showMessage(`Type "${typeName}" completely removed.`);
       }
-
-      const newTypes = manifestTypes.filter(t => t.id !== id);
-      setManifestTypes(newTypes);
-      
-      if (manifestType === typeName) {
-          const activeTypes = newTypes.filter(t => t.is_active);
-          setManifestType(activeTypes.length > 0 ? activeTypes[0].name : '');
-      }
-      showMessage(`Type "${typeName}" completely removed.`);
   };
 
   const handleTypeSort = async () => {
@@ -254,20 +256,19 @@ export default function ManifestsPage() {
     let _types = [...manifestTypes];
     const draggedItemContent = _types.splice(dragTypeItem.current, 1)[0];
     _types.splice(dragTypeOverItem.current, 0, draggedItemContent);
-    
     dragTypeItem.current = null;
     dragTypeOverItem.current = null;
-    
     setManifestTypes(_types);
-    
-    // Save new order to DB directly
     for (let i = 0; i < _types.length; i++) {
         await supabase.from('manifest_types').update({ sort_order: i }).eq('id', _types[i].id);
     }
   };
 
   const loadManifests = async (allowedDpIds: string[]) => {
-    if (allowedDpIds.length === 0) { setManifests([]); return; }
+    if (allowedDpIds.length === 0 || allowedDpIds.includes('NONE-NO-ACCESS')) { 
+        setManifests([]); 
+        return; 
+    }
     const { data } = await supabase.from('manifests')
       .select(`*, distribution_points (id, name, code), manifest_items (target_qty, distributed_qty, products (name))`)
       .in('distribution_point_id', allowedDpIds)
@@ -317,7 +318,13 @@ export default function ManifestsPage() {
     return m.status !== 'Active' || validToDate < todayDate;
   });
 
-  // --- Export Logic ---
+  // Apply Pagination
+  const totalActivePages = Math.ceil(activeSection.length / MANIFESTS_PER_PAGE);
+  const paginatedActive = activeSection.slice((activePage - 1) * MANIFESTS_PER_PAGE, activePage * MANIFESTS_PER_PAGE);
+
+  const totalInactivePages = Math.ceil(inactiveSection.length / MANIFESTS_PER_PAGE);
+  const paginatedInactive = inactiveSection.slice((inactivePage - 1) * MANIFESTS_PER_PAGE, inactivePage * MANIFESTS_PER_PAGE);
+
   const handleExportExcel = () => {
     const [year, monthNum] = filterMonth ? filterMonth.split('-') : ['', ''];
     const monthName = filterMonth ? new Date(parseInt(year), parseInt(monthNum) - 1, 1).toLocaleString('default', { month: 'long' }) : 'All Time';
@@ -407,7 +414,8 @@ export default function ManifestsPage() {
       const { error } = await supabase.from('manifests').insert([payload]);
       if (error) throw error;
       showMessage("Manifest created successfully!");
-      await loadManifests(distributionPoints.map(dp => dp.id));
+      
+      await fetchInitialData();
       resetCreateForm();
     } catch (err: any) { showMessage(`Error creating manifest: ${err.message}`, "error"); }
   };
@@ -442,7 +450,8 @@ export default function ManifestsPage() {
       const { error } = await supabase.from('manifests').update(payload).eq('id', manifestToEdit.id);
       if (error) throw error;
       showMessage("Manifest updated successfully!");
-      await loadManifests(distributionPoints.map(dp => dp.id));
+      
+      await fetchInitialData();
       setIsEditModalOpen(false);
     } catch (err: any) { showMessage(`Error updating manifest: ${err.message}`, "error"); } 
     finally { setIsSubmittingEdit(false); }
@@ -548,7 +557,6 @@ export default function ManifestsPage() {
     return 'bg-slate-50 text-slate-700 border-slate-200';
   };
 
-  // SVG Icons Fallback if not in Icons.tsx
   const SettingsIcon = () => (
     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
   );
@@ -613,7 +621,11 @@ export default function ManifestsPage() {
             <div>
               <label className="block text-xs font-bold text-indigo-600 uppercase mb-1">Distribution Point</label>
               <select value={selectedDp} onChange={(e) => setSelectedDp(e.target.value)} required className="w-full px-3 py-2 bg-indigo-50 border border-indigo-200 rounded-lg text-sm text-indigo-900 font-bold outline-none focus:border-indigo-500">
-                <option value="">-- Select Target DP --</option>
+                {distributionPoints.length === 0 ? (
+                    <option value="">-- No Assigned DPs --</option>
+                ) : (
+                    <option value="">-- Select Target DP --</option>
+                )}
                 {distributionPoints.map(dp => <option key={dp.id} value={dp.id}>{dp.name}</option>)}
               </select>
             </div>
@@ -643,7 +655,11 @@ export default function ManifestsPage() {
                 <div>
                   <label className="block text-[10px] font-bold text-indigo-600 uppercase mb-1">Filter by Target DP</label>
                   <select value={filterDp} onChange={(e) => setFilterDp(e.target.value)} className="w-full px-3 py-2 bg-indigo-50 border border-indigo-200 rounded-xl text-xs font-bold text-indigo-900 outline-none focus:border-indigo-500">
-                    <option value="ALL">All Allowed DPs</option>
+                    {distributionPoints.length === 0 ? (
+                        <option value="ALL">No Assigned DPs</option>
+                    ) : (
+                        <option value="ALL">All Allowed DPs</option>
+                    )}
                     {distributionPoints.map(dp => <option key={dp.id} value={dp.id}>{dp.name}</option>)}
                   </select>
                 </div>
@@ -694,10 +710,10 @@ export default function ManifestsPage() {
                   <tbody className="divide-y divide-slate-100">
                     {isLoading ? (
                       <tr><td colSpan={4} className="p-10 text-center"><Icons.Spinner /></td></tr>
-                    ) : activeSection.length === 0 ? (
+                    ) : paginatedActive.length === 0 ? (
                       <tr><td colSpan={4} className="p-10 text-center text-sm text-slate-500 bg-slate-50/50">No active manifests found for this selection.</td></tr>
                     ) : (
-                      activeSection.map((manifest) => (
+                      paginatedActive.map((manifest) => (
                         <tr key={manifest.id} className="hover:bg-slate-50 transition-colors group">
                           <td className="p-4">
                             <p className="font-bold text-slate-900 text-sm break-words">{manifest.title}</p>
@@ -734,6 +750,16 @@ export default function ManifestsPage() {
                   </tbody>
                </table>
              </div>
+             {/* Pagination for Active Manifests */}
+             {activeSection.length > MANIFESTS_PER_PAGE && (
+               <div className="flex justify-between items-center p-3 bg-white border-t border-slate-200">
+                 <span className="text-xs font-bold text-slate-500 ml-2">Page {activePage} of {totalActivePages}</span>
+                 <div className="flex space-x-2 mr-2">
+                   <button onClick={() => setActivePage(p => Math.max(1, p - 1))} disabled={activePage === 1} className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 text-slate-700 text-xs font-bold rounded-lg transition-colors">Prev</button>
+                   <button onClick={() => setActivePage(p => Math.min(totalActivePages, p + 1))} disabled={activePage === totalActivePages} className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 text-slate-700 text-xs font-bold rounded-lg transition-colors">Next</button>
+                 </div>
+               </div>
+             )}
            </div>
 
            {/* Section 2: Expired, Hold, Inactive */}
@@ -757,10 +783,10 @@ export default function ManifestsPage() {
                   <tbody className="divide-y divide-slate-100">
                     {isLoading ? (
                       <tr><td colSpan={4} className="p-10 text-center"><Icons.Spinner /></td></tr>
-                    ) : inactiveSection.length === 0 ? (
+                    ) : paginatedInactive.length === 0 ? (
                       <tr><td colSpan={4} className="p-10 text-center text-sm text-slate-500 bg-slate-50/50">No inactive manifests found for this selection.</td></tr>
                     ) : (
-                      inactiveSection.map((manifest) => {
+                      paginatedInactive.map((manifest) => {
                         const validToDate = new Date(manifest.valid_to);
                         validToDate.setHours(0, 0, 0, 0);
                         const isExpired = validToDate < todayDate;
@@ -804,6 +830,16 @@ export default function ManifestsPage() {
                   </tbody>
                </table>
              </div>
+             {/* Pagination for Inactive Manifests */}
+             {inactiveSection.length > MANIFESTS_PER_PAGE && (
+               <div className="flex justify-between items-center p-3 bg-white border-t border-slate-200">
+                 <span className="text-xs font-bold text-slate-500 ml-2">Page {inactivePage} of {totalInactivePages}</span>
+                 <div className="flex space-x-2 mr-2">
+                   <button onClick={() => setInactivePage(p => Math.max(1, p - 1))} disabled={inactivePage === 1} className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 text-slate-700 text-xs font-bold rounded-lg transition-colors">Prev</button>
+                   <button onClick={() => setInactivePage(p => Math.min(totalInactivePages, p + 1))} disabled={inactivePage === totalInactivePages} className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 text-slate-700 text-xs font-bold rounded-lg transition-colors">Next</button>
+                 </div>
+               </div>
+             )}
            </div>
 
         </div>
@@ -948,7 +984,7 @@ export default function ManifestsPage() {
                
                <div>
                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Status</label>
-                 <select value={editStatus} onChange={(e) => setEditStatus(e.target.value)} className="w-full px-3 py-2.5 bg-white border border-slate-300 rounded-lg text-sm text-slate-900 font-bold outline-none focus:border-indigo-500">
+                 <select value={editStatus} onChange={(e) => setStatus(e.target.value)} className="w-full px-3 py-2.5 bg-white border border-slate-300 rounded-lg text-sm text-slate-900 font-bold outline-none focus:border-indigo-500">
                    {STATUS_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
                  </select>
                </div>

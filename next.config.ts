@@ -2,6 +2,12 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   /* config options here */
+
+  devIndicators: {
+    appIsrStatus: false, 
+    buildActivity: false,
+  },
+
   experimental: {
     agentFeedback: true,
   },
@@ -16,5 +22,6 @@ const nextConfig: NextConfig = {
     },
   },
 };
+
 
 export default nextConfig;

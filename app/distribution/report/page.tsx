@@ -28,7 +28,7 @@ export default function DailyDistributionReportPage() {
   
   // Left Panel States
   const [activeManifests, setActiveManifests] = useState<any[]>([]);
-  const [leftDpFilter, setLeftDpFilter] = useState('ALL');
+  const [leftDpFilter, setLeftDpFilter] = useState('');
   
   // Right Panel Data
   const [allManifestItems, setAllManifestItems] = useState<any[]>([]);
@@ -57,7 +57,7 @@ export default function DailyDistributionReportPage() {
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [distToEdit, setDistToEdit] = useState<any>(null);
   const [editValues, setEditValues] = useState<Record<string, { qty: number | '', hh: number | '' }>>({});
-  const [editMaxStocks, setEditMaxStocks] = useState<Record<string, number>>({}); // Mapped by product_id now
+  const [editMaxStocks, setEditMaxStocks] = useState<Record<string, number>>({}); 
   const [editRemarks, setEditRemarks] = useState('');
 
   const [revertModalOpen, setRevertModalOpen] = useState(false);
@@ -67,14 +67,12 @@ export default function DailyDistributionReportPage() {
   const [detailsData, setDetailsData] = useState<any>(null);
 
   useEffect(() => {
-    // Timezone safe date
     const today = new Date();
     const dateStr = new Date(today.getTime() - (today.getTimezoneOffset() * 60000)).toISOString().split('T')[0];
     setDistDate(dateStr);
     initData();
   }, []);
 
-  // Reset pagination when filters change
   useEffect(() => {
     setCurrentPage(1);
   }, [filterDpId, filterStartDate, filterEndDate, tableSearch]);
@@ -87,20 +85,84 @@ export default function DailyDistributionReportPage() {
 
   const initData = async () => {
     setIsLoading(true);
-    const { data: { user } } = await supabase.auth.getUser();
-    if (user) setCurrentUser(user);
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) setCurrentUser(user);
 
-    const { data: dps } = await supabase.from('distribution_points').select('*').order('name');
-    if (dps) setDistributionPoints(dps);
+      const sessionStr = localStorage.getItem('user_session');
+      const sessionUser = sessionStr ? JSON.parse(sessionStr) : null;
+      
+      let profile = null;
+      if (user) {
+          const { data } = await supabase.from('profiles').select('*').eq('id', user.id).single();
+          profile = data;
+      }
 
-    await loadManifestsAndData(dps || []);
+      // STRICT Exact Match for Super Admin to avoid false positives with names like "Distribution Admin"
+      const roleStr = String(profile?.role || sessionUser?.role || '').toUpperCase();
+      const isSuperAdmin = roleStr === 'SUPER ADMIN' || roleStr === 'ADMIN';
+
+      const { data: dpData } = await supabase.from('distribution_points').select('id, name, code').order('name');
+      const allDps = dpData || [];
+      let allowedDps = [];
+
+      if (isSuperAdmin) {
+          allowedDps = allDps;
+      } else {
+          // Parse IDs robustly just like manifest page
+          let rawIds = profile?.assigned_dp_ids || sessionUser?.assigned_dp_ids || [];
+          let dpIds: string[] = [];
+
+          if (typeof rawIds === 'string') {
+              try { 
+                  dpIds = JSON.parse(rawIds); 
+              } catch { 
+                  dpIds = rawIds.includes(',') ? rawIds.split(',') : [rawIds]; 
+              }
+          } else if (Array.isArray(rawIds)) {
+              dpIds = rawIds;
+          } else if (rawIds && typeof rawIds === 'object') {
+              dpIds = Object.values(rawIds);
+          }
+
+          // Strict matching for DP IDs
+          const cleanDpIds = dpIds.map(id => String(id).trim()).filter(id => id !== '');
+          allowedDps = allDps.filter(dp => cleanDpIds.includes(String(dp.id).trim()));
+      }
+
+      setDistributionPoints(allowedDps);
+      
+      // Select first DP automatically if available
+      if (allowedDps.length > 0) {
+          setLeftDpFilter(allowedDps[0].id);
+      } else {
+          setLeftDpFilter('');
+      }
+
+      // Fetch manifests only for allowed DPs
+      const idsToFetch = allowedDps.length > 0 ? allowedDps.map(dp => dp.id) : ['NONE-NO-ACCESS'];
+      await loadManifestsAndData(idsToFetch);
+
+    } catch (err) {
+      console.error("Error fetching DP assignment:", err);
+    }
+    
     setIsLoading(false);
   };
 
-  const loadManifestsAndData = async (dps: any[]) => {
+  const loadManifestsAndData = async (allowedDpIds: string[]) => {
+    if (allowedDpIds.length === 0 || allowedDpIds.includes('NONE-NO-ACCESS')) {
+      setActiveManifests([]);
+      setAllManifestItems([]);
+      setInputs({});
+      setHistoryItems([]);
+      return;
+    }
+
     const { data: mData } = await supabase.from('manifests')
       .select('*, dp:distribution_points(*)')
       .eq('status', 'Active')
+      .in('distribution_point_id', allowedDpIds)
       .order('created_at', { ascending: false });
 
     // Timezone-safe date check for Active Manifests
@@ -147,13 +209,14 @@ export default function DailyDistributionReportPage() {
     const { data: hData } = await supabase.from('distributions')
       .select(`
         id, distribution_date, remarks, created_by_email, updated_by_email, updated_at, created_at,
-        distribution_points (id, name, code, nfi_warehouse_id, lpg_warehouse_id),
+        distribution_points!inner (id, name, code, nfi_warehouse_id, lpg_warehouse_id),
         distribution_items (
           id, quantity, total_hh, product_id, manifest_id,
           products (name, code, unit_type, product_type),
           manifests (title, manifest_code)
         )
       `)
+      .in('distribution_point_id', allowedDpIds)
       .order('distribution_date', { ascending: false })
       .order('created_at', { ascending: false });
 
@@ -339,7 +402,8 @@ export default function DailyDistributionReportPage() {
       });
       setInputs(initInputs);
 
-      await loadManifestsAndData(distributionPoints);
+      const idsToFetch = distributionPoints.length > 0 ? distributionPoints.map(dp => dp.id) : ['NONE-NO-ACCESS'];
+      await loadManifestsAndData(idsToFetch);
 
     } catch (err: any) {
       showMessage(`Submission failed: ${err.message}`, "error");
@@ -451,7 +515,8 @@ export default function DailyDistributionReportPage() {
       
       showMessage(`Transaction updated successfully!`, "success");
       setEditModalOpen(false);
-      await loadManifestsAndData(distributionPoints);
+      const idsToFetch = distributionPoints.length > 0 ? distributionPoints.map(dp => dp.id) : ['NONE-NO-ACCESS'];
+      await loadManifestsAndData(idsToFetch);
 
     } catch (err: any) {
       showMessage(`Edit failed: ${err.message}`, "error");
@@ -484,7 +549,8 @@ export default function DailyDistributionReportPage() {
 
       showMessage(`Entire transaction deleted & stock restored.`, "success");
       setRevertModalOpen(false);
-      await loadManifestsAndData(distributionPoints);
+      const idsToFetch = distributionPoints.length > 0 ? distributionPoints.map(dp => dp.id) : ['NONE-NO-ACCESS'];
+      await loadManifestsAndData(idsToFetch);
     } catch (err: any) {
       showMessage(`Delete failed: ${err.message}`, "error");
     } finally {
@@ -492,7 +558,7 @@ export default function DailyDistributionReportPage() {
     }
   };
 
-  const filteredLeftManifests = activeManifests.filter(m => leftDpFilter === 'ALL' ? true : m.distribution_point_id === leftDpFilter);
+  const filteredLeftManifests = activeManifests.filter(m => leftDpFilter ? m.distribution_point_id === leftDpFilter : false);
   
   const filteredHistory = historyItems.filter(dist => {
     const matchDp = filterDpId === 'ALL' ? true : dist.distribution_points.id === filterDpId;
@@ -634,7 +700,11 @@ export default function DailyDistributionReportPage() {
             </div>
             <div className="p-2 bg-slate-50 border-b border-slate-200 shrink-0">
               <select value={leftDpFilter} onChange={(e) => setLeftDpFilter(e.target.value)} className="w-full px-2 py-2 bg-white border border-slate-300 rounded-lg text-xs font-bold text-slate-900 outline-none focus:border-indigo-500">
-                <option value="ALL">All Distribution Points</option>
+                {distributionPoints.length === 0 ? (
+                    <option value="" disabled>No Assigned DPs</option>
+                ) : (
+                    <option value="" disabled>-- Select Distribution Point --</option>
+                )}
                 {distributionPoints.map(dp => <option key={dp.id} value={dp.id}>[{dp.code}] {dp.name}</option>)}
               </select>
             </div>
@@ -643,7 +713,9 @@ export default function DailyDistributionReportPage() {
               {isLoading ? (
                 <div className="p-6 text-center"><Icons.Spinner /></div>
               ) : filteredLeftManifests.length === 0 ? (
-                <div className="p-6 text-center text-slate-900 text-xs font-bold border-2 border-dashed border-slate-200 rounded-xl m-1">No active manifests found.</div>
+                <div className="p-6 text-center text-slate-900 text-xs font-bold border-2 border-dashed border-slate-200 rounded-xl m-1">
+                  {!leftDpFilter ? "Please select a Distribution Point." : "No active manifests found."}
+                </div>
               ) : (
                 filteredLeftManifests.map((m, idx) => {
                   const theme = MANIFEST_COLORS[idx % MANIFEST_COLORS.length];
@@ -694,7 +766,12 @@ export default function DailyDistributionReportPage() {
             
             <div className="p-4 space-y-6 bg-slate-50/30">
               {filteredLeftManifests.length === 0 ? (
-                <div className="flex flex-col items-center justify-center text-slate-900 p-10"><span className="text-4xl mb-3 opacity-50">📋</span><p className="text-sm font-bold">No Active Manifests</p></div>
+                <div className="flex flex-col items-center justify-center text-slate-900 p-10">
+                  <span className="text-4xl mb-3 opacity-50">📋</span>
+                  <p className="text-sm font-bold">
+                    {!leftDpFilter ? "Select a DP to input distribution" : "No Active Manifests"}
+                  </p>
+                </div>
               ) : (
                 filteredLeftManifests.map((manifest, idx) => {
                   const theme = MANIFEST_COLORS[idx % MANIFEST_COLORS.length];
