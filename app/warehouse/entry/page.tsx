@@ -1,5 +1,6 @@
 "use client";
-
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
 import React, { useState, useEffect, useRef } from 'react';
 import { Icons } from './../../components/Icons';
 import { createClient } from '@supabase/supabase-js';

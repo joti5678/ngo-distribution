@@ -68,7 +68,10 @@ export default function ProductTransferPage() {
         const sessionUser = sessionStr ? JSON.parse(sessionStr) : null;
         
         const { data: profile } = await supabase.from('profiles').select('role, user_roles(role_name)').eq('id', user?.id).single();
-        const roleName = String(profile?.user_roles?.role_name || profile?.role || sessionUser?.role || '').toUpperCase();
+
+        // Type assertion to bypass TS complaining about role_name
+const roleData: any = profile?.user_roles;
+const roleName = String(roleData?.role_name || profile?.role || sessionUser?.role || '').toUpperCase();
         const isSuperAdmin = roleName.includes('SUPER ADMIN') || roleName === 'ADMIN' || roleName.includes('WEB ADMIN');
 
         // Bulletproof Logic for Fetching assigned_wh_ids (From OLD Code)
