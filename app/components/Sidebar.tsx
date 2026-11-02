@@ -11,18 +11,15 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
 );
 
-const DEFAULT_BRANDING = {
-    appName: "NGO Connect",
-    logoText: "NC"
-};
-
 export default function Sidebar({ isOpen, setIsOpen }: { isOpen: boolean, setIsOpen: (val: boolean) => void }) {
   const pathname = usePathname();
   const router = useRouter();
   
   const [userRole, setUserRole] = useState<string>('Loading...'); 
   const [sidebarMenus, setSidebarMenus] = useState<any[]>([]);
-  const [branding, setBranding] = useState(DEFAULT_BRANDING);
+  
+  // সম্পূর্ণ ব্ল্যাংক ইনিশিয়াল স্টেট, যাতে প্রথমে কোনো ভুল নাম না দেখায়
+  const [branding, setBranding] = useState({ appName: "Loading...", logoText: ".." });
   const [isLoading, setIsLoading] = useState(true);
   
   // Track open folders for Accordion Dropdown
@@ -54,11 +51,14 @@ export default function Sidebar({ isOpen, setIsOpen }: { isOpen: boolean, setIsO
           isSuperAdmin ? Promise.resolve({ data: [] }) : supabase.from('role_route_access').select('menu_id').eq('role_id', sessionUser.role_id)
       ]);
 
-      if (brandRes.data?.settings) {
+      // ডেটাবেস থেকে পাওয়া ডাইনামিক নাম সেট করা
+      if (brandRes.data?.settings && brandRes.data.settings.logoText) {
           setBranding({
-              appName: brandRes.data.settings.logoText || DEFAULT_BRANDING.appName,
-              logoText: (brandRes.data.settings.logoText || DEFAULT_BRANDING.logoText).substring(0, 2).toUpperCase()
+              appName: brandRes.data.settings.logoText,
+              logoText: brandRes.data.settings.logoText.substring(0, 2).toUpperCase()
           });
+      } else {
+          setBranding({ appName: "Distribution System", logoText: "DS" }); // ডেটাবেস একদম খালি থাকলে ফলব্যাক
       }
 
       const allMenus = menusRes.data || [];
@@ -133,17 +133,32 @@ export default function Sidebar({ isOpen, setIsOpen }: { isOpen: boolean, setIsO
 
   return (
     <>
+      {/* Mobile Header Top Bar */}
+      <div className="md:hidden fixed top-0 left-0 right-0 h-16 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-4 z-50">
+          <div className="flex items-center space-x-3">
+              <div className="w-8 h-8 bg-gradient-to-br from-indigo-500 to-cyan-500 rounded-lg flex items-center justify-center text-white font-bold text-sm shadow-lg shadow-indigo-500/20">
+                  {branding.logoText}
+              </div>
+              <h2 className="text-lg font-bold text-white tracking-wide truncate">{branding.appName}</h2>
+          </div>
+          <button onClick={() => setIsOpen(!isOpen)} className="text-slate-300 hover:text-white p-2">
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" /></svg>
+          </button>
+      </div>
+
+      {/* Sidebar Backdrop for Mobile */}
       {isOpen && (
         <div 
-          className="fixed inset-0 bg-slate-900/60 z-40 md:hidden backdrop-blur-sm transition-opacity"
+          className="fixed inset-0 bg-slate-900/60 z-50 md:hidden backdrop-blur-sm transition-opacity"
           onClick={() => setIsOpen(false)}
         />
       )}
 
-      <aside className={`fixed md:static inset-y-0 left-0 z-50 w-72 bg-slate-900 text-slate-300 flex flex-col h-screen transform transition-transform duration-300 ease-in-out ${isOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'} border-r border-slate-800 shrink-0 shadow-2xl md:shadow-none`}>
+      {/* Main Sidebar */}
+      <aside className={`fixed md:static inset-y-0 left-0 z-[60] md:z-50 w-72 bg-slate-900 text-slate-300 flex flex-col h-screen transform transition-transform duration-300 ease-in-out ${isOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'} border-r border-slate-800 shrink-0 shadow-2xl md:shadow-none`}>
         
         {/* Dynamic Logo from DB */}
-        <div className="p-6 flex items-center justify-between shrink-0 border-b border-slate-800/50">
+        <div className="p-6 flex items-center justify-between shrink-0 border-b border-slate-800/50 pt-20 md:pt-6">
           <div className="flex items-center space-x-3">
             <div className="w-10 h-10 bg-gradient-to-br from-indigo-500 to-cyan-500 rounded-xl flex items-center justify-center text-white font-bold shadow-lg shadow-indigo-500/20">
               {branding.logoText}

@@ -28,6 +28,7 @@ export default function CatalogPage() {
   const [newProdPieces, setNewProdPieces] = useState(1);
   const [newProdType, setNewProdType] = useState('NFI'); 
   const [newProdStatus, setNewProdStatus] = useState('Active'); 
+  const [newIsOpenStock, setNewIsOpenStock] = useState(false); // <--- New State
   const [editingProduct, setEditingProduct] = useState<any>(null);
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
@@ -39,6 +40,7 @@ export default function CatalogPage() {
   const [editPieces, setEditPieces] = useState(1);
   const [editType, setEditType] = useState('NFI'); 
   const [editStatus, setEditStatus] = useState('Active'); 
+  const [editIsOpenStock, setEditIsOpenStock] = useState(false); // <--- New State
 
   // 2-Step Edit Modal States
   const [editModalOpen, setEditModalOpen] = useState(false);
@@ -72,7 +74,7 @@ export default function CatalogPage() {
       .eq('status', 'Active') // Only show ACTIVE products in catalog as per instructions
       .order('sort_order', { ascending: true }) 
       .order('created_at', { ascending: false });
-      
+
     if (prodData) setProducts(prodData);
     setIsLoading(false);
   };
@@ -87,14 +89,15 @@ export default function CatalogPage() {
   const handleCreateProduct = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(''); setSuccessMsg('');
-    
+
     if (!newProdName || !newProdCode) { setErrorMsg("Please fill all required fields."); return; }
     const finalUnit = newProdUnit === 'Others' ? customUnit : newProdUnit;
     if (!finalUnit) { setErrorMsg("Please specify the unit type."); return; }
 
     const payload = {
       name: newProdName, code: newProdCode, unit_type: finalUnit, 
-      pieces_per_pack: newProdPieces, product_type: newProdType, status: newProdStatus
+      pieces_per_pack: newProdPieces, product_type: newProdType, status: newProdStatus,
+      is_open_stock: newIsOpenStock // <--- Adding to payload
     };
 
     const nextSortOrder = products.length > 0 ? Math.max(...products.map(p => p.sort_order || 0)) + 1 : 1;
@@ -115,12 +118,13 @@ export default function CatalogPage() {
     e.preventDefault();
     if (!editingProduct) return;
     setIsSubmitting(true);
-    
+
     const finalUnit = editUnit === 'Others' ? editCustomUnit : editUnit;
     if (!finalUnit) { setErrorMsg("Please specify the unit type."); setIsSubmitting(false); return; }
 
     const newData = {
-      name: editName, unit_type: finalUnit, pieces_per_pack: editPieces, product_type: editType, status: editStatus
+      name: editName, unit_type: finalUnit, pieces_per_pack: editPieces, product_type: editType, status: editStatus,
+      is_open_stock: editIsOpenStock // <--- Adding to payload
     };
 
     const { error } = await supabase.from('products').update(newData).eq('id', editingProduct.id);
@@ -144,7 +148,8 @@ export default function CatalogPage() {
     setEditPieces(prod.pieces_per_pack);
     setEditType(prod.product_type || 'NFI');
     setEditStatus(prod.status || 'Active');
-    
+    setEditIsOpenStock(prod.is_open_stock || false); // <--- Set state from DB
+
     if (STANDARD_UNITS.includes(prod.unit_type)) {
       setEditUnit(prod.unit_type); setEditCustomUnit('');
     } else {
@@ -156,6 +161,7 @@ export default function CatalogPage() {
   const resetForm = () => {
     setEditingProduct(null); setNewProdName(''); setNewProdCode(''); setNewProdPieces(1);
     setNewProdType('NFI'); setNewProdUnit('Piece'); setCustomUnit(''); setNewProdStatus('Active');
+    setNewIsOpenStock(false); // <--- Reset toggle
   };
 
   const initiateDelete = (prod: any) => {
@@ -167,13 +173,13 @@ export default function CatalogPage() {
   const confirmDelete = async () => {
     if(!productToDelete) return;
     setIsSubmitting(true);
-    
+
     // Soft Delete: status = 'Deleted', alter code to free it up for reuse
     const archivedCode = `${productToDelete.code}_DEL_${Date.now().toString().slice(-6)}`;
     const newData = { status: 'Deleted', code: archivedCode };
 
     const { error } = await supabase.from('products').update(newData).eq('id', productToDelete.id);
-      
+
     if(!error) {
       await logAudit(productToDelete.id, 'DELETE', productToDelete, newData);
       setProducts(products.filter(p => p.id !== productToDelete.id));
@@ -206,7 +212,8 @@ export default function CatalogPage() {
   const handleExportExcel = () => {
     const exportData = products.map((p, i) => ({
       "SL": i + 1, "Product Code": p.code, "Product Name": p.name, "Item Type": p.product_type,
-      "Unit Type": p.unit_type, "Qty Per Pack": p.pieces_per_pack, "Status": p.status
+      "Unit Type": p.unit_type, "Qty Per Pack": p.pieces_per_pack, "Status": p.status,
+      "Open Stock": p.is_open_stock ? "Yes" : "No"
     }));
     const worksheet = XLSX.utils.json_to_sheet(exportData);
     const workbook = XLSX.utils.book_new();
@@ -219,8 +226,8 @@ export default function CatalogPage() {
     doc.setFontSize(14); doc.text("Master Product Catalog", 14, 15);
     doc.setFontSize(9); doc.setTextColor(100); doc.text(`Generated: ${new Date().toLocaleString()}`, 14, 21);
 
-    const tableColumn = ["SL", "Type", "Product Code", "Product Name", "Unit", "Qty/Pack"];
-    const tableRows = products.map((p, i) => [i + 1, p.product_type, p.code, p.name, p.unit_type, p.pieces_per_pack]);
+    const tableColumn = ["SL", "Type", "Product Code", "Product Name", "Unit", "Open Stock"];
+    const tableRows = products.map((p, i) => [i + 1, p.product_type, p.code, p.name, p.unit_type, p.is_open_stock ? "Yes" : "No"]);
 
     autoTable(doc, { head: [tableColumn], body: tableRows, startY: 26, theme: 'grid', styles: { fontSize: 8.5 }});
     doc.save(`Product_Catalog.pdf`);
@@ -236,7 +243,7 @@ export default function CatalogPage() {
       const workbook = XLSX.read(data, { type: 'array' });
       const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
       const rows: any[] = XLSX.utils.sheet_to_json(firstSheet);
-      
+
       const { data: dbProducts } = await supabase.from('products').select('id, code');
       const codeMap = new Map(dbProducts?.map(p => [p.code.toLowerCase(), p.id]));
 
@@ -246,6 +253,8 @@ export default function CatalogPage() {
         const type = row["Item Type"]?.toString().trim().toUpperCase() === 'LPG' ? 'LPG' : 'NFI';
         const unit = row["Unit Type"]?.toString().trim() || 'Piece';
         const qty = parseInt(row["Qty Per Pack"]) || 1;
+        const openStockRaw = row["Open Stock"]?.toString().trim().toLowerCase();
+        const isOpenStock = openStockRaw === 'yes' || openStockRaw === 'true' || openStockRaw === '1';
 
         let status: 'NEW' | 'UPDATE' | 'ERROR' = 'NEW';
         let existingId = null;
@@ -257,7 +266,7 @@ export default function CatalogPage() {
           existingId = codeMap.get(code.toLowerCase());
         }
 
-        return { code, name, product_type: type, unit_type: unit, pieces_per_pack: qty, status, existingId };
+        return { code, name, product_type: type, unit_type: unit, pieces_per_pack: qty, status, existingId, is_open_stock: isOpenStock };
       });
 
       setPreviewData(parsedData);
@@ -276,7 +285,7 @@ export default function CatalogPage() {
       const item = previewData[i];
       if (item.status === 'ERROR') continue;
 
-      const payload = { name: item.name, code: item.code, product_type: item.product_type, unit_type: item.unit_type, pieces_per_pack: item.pieces_per_pack, status: 'Active' };
+      const payload = { name: item.name, code: item.code, product_type: item.product_type, unit_type: item.unit_type, pieces_per_pack: item.pieces_per_pack, status: 'Active', is_open_stock: item.is_open_stock };
 
       if (item.status === 'UPDATE' && item.existingId) {
         await supabase.from('products').update(payload).eq('id', item.existingId);
@@ -297,7 +306,7 @@ export default function CatalogPage() {
 
   return (
     <div className="flex flex-col h-full bg-slate-50 w-full animate-in fade-in duration-500 relative">
-      
+
       <header className="flex flex-col md:flex-row h-auto md:h-20 bg-white border-b border-slate-200 md:items-center justify-between px-4 md:px-6 py-4 md:py-0 pr-16 md:pr-24 shrink-0 shadow-sm z-10 gap-4 md:gap-0">
         <div className="flex items-center">
           <button onClick={() => window.history.back()} className="mr-3 md:mr-4 p-2 rounded-full hover:bg-slate-100 text-slate-600 transition-colors">
@@ -308,7 +317,7 @@ export default function CatalogPage() {
             <p className="text-[10px] md:text-sm text-slate-500">Manage NFI & LPG Inventory Definitions</p>
           </div>
         </div>
-        
+
         <div className="flex flex-wrap items-center gap-2 md:gap-3">
           <button onClick={handleExportExcel} className="flex items-center px-3 py-2 bg-emerald-50 border border-emerald-200 text-emerald-700 hover:bg-emerald-100 text-xs font-bold rounded-xl transition-all shadow-sm">
             <Icons.Download /> <span className="ml-1">Excel Export</span>
@@ -328,7 +337,7 @@ export default function CatalogPage() {
         {successMsg && <div className="mb-4 p-3 bg-emerald-50 text-emerald-700 text-sm font-bold rounded-xl border border-emerald-200">{successMsg}</div>}
 
         <div className="grid grid-cols-1 xl:grid-cols-4 gap-6 items-start">
-          
+
           {/* Form */}
           <div className="bg-white p-5 md:p-6 rounded-2xl border border-slate-200 shadow-sm xl:col-span-1 h-fit sticky top-0">
             <h3 className="text-lg font-bold text-slate-900 mb-4 flex items-center">
@@ -360,7 +369,7 @@ export default function CatalogPage() {
                 <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">SKU / Code (Unique)</label>
                 <input type="text" value={newProdCode} onChange={(e) => setNewProdCode(e.target.value)} required className="w-full px-4 py-2.5 bg-white border border-slate-300 rounded-xl text-sm text-slate-900 font-bold outline-none focus:border-indigo-500" />
               </div>
-              
+
               <div className="grid grid-cols-2 gap-3">
                 <div className="col-span-2">
                   <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">Unit Type</label>
@@ -377,16 +386,32 @@ export default function CatalogPage() {
                 </div>
               </div>
 
-              {/* Status Toggle */}
-              <div>
-                <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">Visibility Status</label>
-                <select value={newProdStatus} onChange={(e) => setNewProdStatus(e.target.value)} className="w-full px-4 py-2.5 bg-white border border-slate-300 rounded-xl text-sm text-slate-900 font-bold outline-none focus:border-indigo-500">
-                  <option value="Active">Active (Visible)</option>
-                  <option value="Inactive">Inactive (Hidden)</option>
-                </select>
-                <p className="text-[10px] text-slate-400 mt-1">Inactive items won&apos;t show in distribution menus.</p>
+              {/* Settings section */}
+              <div className="p-3 bg-amber-50/50 rounded-xl border border-amber-200 space-y-3">
+                {/* Status Toggle */}
+                <div>
+                  <label className="block text-xs font-bold text-amber-800 uppercase mb-1.5">Visibility Status</label>
+                  <select value={newProdStatus} onChange={(e) => setNewProdStatus(e.target.value)} className="w-full px-4 py-2 bg-white border border-amber-200 rounded-lg text-xs text-slate-900 font-bold outline-none focus:border-amber-500">
+                    <option value="Active">Active (Visible)</option>
+                    <option value="Inactive">Inactive (Hidden)</option>
+                  </select>
+                  <p className="text-[9px] text-slate-500 mt-1">Inactive items won&apos;t show in distribution menus.</p>
+                </div>
+
+                {/* Open Stock Toggle - NEW */}
+                <div className="border-t border-amber-200/60 pt-3">
+                   <label className="flex items-start space-x-3 cursor-pointer">
+                     <div className="mt-0.5">
+                        <input type="checkbox" checked={newIsOpenStock} onChange={(e) => setNewIsOpenStock(e.target.checked)} className="w-4 h-4 text-amber-600 rounded border-amber-300 focus:ring-amber-500" />
+                     </div>
+                     <div>
+                        <p className="text-xs font-bold text-amber-900 uppercase">Allow Open Stock</p>
+                        <p className="text-[10px] text-amber-700 leading-tight mt-0.5">If checked, this item can be distributed without requiring warehouse stock (e.g., Vendor Direct / Drop-ship).</p>
+                     </div>
+                   </label>
+                </div>
               </div>
-              
+
               <button type="submit" className="w-full text-white py-3 rounded-xl text-sm font-bold shadow-md hover:shadow-lg transition-all mt-2 bg-indigo-600 hover:bg-indigo-700">
                 Add to Catalog
               </button>
@@ -436,7 +461,10 @@ export default function CatalogPage() {
                                 {prod.product_type || 'NFI'}
                               </span>
                               <div>
-                                <p className="font-bold text-slate-900 text-sm leading-tight">{prod.name}</p>
+                                <div className="flex items-center gap-2">
+                                    <p className="font-bold text-slate-900 text-sm leading-tight">{prod.name}</p>
+                                    {prod.is_open_stock && <span className="px-1.5 py-0.5 text-[8px] bg-amber-100 text-amber-800 border border-amber-200 rounded font-black uppercase">Open Stock</span>}
+                                </div>
                                 <p className="text-[10px] text-slate-500 font-mono mt-1">Code: {prod.code}</p>
                               </div>
                             </div>
@@ -479,7 +507,7 @@ export default function CatalogPage() {
               </div>
               <button onClick={() => setEditModalOpen(false)} className="text-slate-400 hover:text-slate-600 bg-slate-50 hover:bg-slate-100 p-2 rounded-lg transition-colors"><Icons.Close /></button>
             </div>
-            
+
             <form onSubmit={submitEditProduct} className="space-y-4 max-h-[70vh] overflow-y-auto custom-scrollbar pr-2">
               <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
                 <label className="block text-xs font-bold text-slate-600 uppercase mb-2">Item Type</label>
@@ -499,7 +527,7 @@ export default function CatalogPage() {
                 <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">Product Name</label>
                 <input type="text" value={editName} onChange={(e) => setEditName(e.target.value)} required className="w-full px-4 py-2.5 bg-white border border-slate-300 rounded-xl text-sm text-slate-900 font-bold outline-none focus:border-amber-500 transition-colors" />
               </div>
-              
+
               <div>
                 <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5 flex justify-between">
                   SKU / Code 
@@ -507,7 +535,7 @@ export default function CatalogPage() {
                 </label>
                 <input type="text" value={editingProduct.code} disabled className="w-full px-4 py-2.5 bg-slate-100 border border-slate-200 rounded-xl text-sm text-slate-500 font-bold cursor-not-allowed" />
               </div>
-              
+
               <div className="grid grid-cols-2 gap-3">
                 <div className="col-span-2">
                   <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">Unit Type</label>
@@ -524,12 +552,28 @@ export default function CatalogPage() {
                 </div>
               </div>
 
-              <div>
-                <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">Visibility Status</label>
-                <select value={editStatus} onChange={(e) => setEditStatus(e.target.value)} className="w-full px-4 py-2.5 bg-white border border-slate-300 rounded-xl text-sm text-slate-900 font-bold outline-none focus:border-amber-500">
-                  <option value="Active">Active (Visible)</option>
-                  <option value="Inactive">Inactive (Hidden)</option>
-                </select>
+              {/* Settings section */}
+              <div className="p-3 bg-amber-50/50 rounded-xl border border-amber-200 space-y-3">
+                  <div>
+                    <label className="block text-xs font-bold text-amber-800 uppercase mb-1.5">Visibility Status</label>
+                    <select value={editStatus} onChange={(e) => setEditStatus(e.target.value)} className="w-full px-4 py-2 bg-white border border-amber-200 rounded-lg text-xs text-slate-900 font-bold outline-none focus:border-amber-500">
+                      <option value="Active">Active (Visible)</option>
+                      <option value="Inactive">Inactive (Hidden)</option>
+                    </select>
+                  </div>
+
+                  {/* Open Stock Toggle - NEW */}
+                  <div className="border-t border-amber-200/60 pt-3">
+                     <label className="flex items-start space-x-3 cursor-pointer">
+                       <div className="mt-0.5">
+                          <input type="checkbox" checked={editIsOpenStock} onChange={(e) => setEditIsOpenStock(e.target.checked)} className="w-4 h-4 text-amber-600 rounded border-amber-300 focus:ring-amber-500" />
+                       </div>
+                       <div>
+                          <p className="text-xs font-bold text-amber-900 uppercase">Allow Open Stock</p>
+                          <p className="text-[10px] text-amber-700 leading-tight mt-0.5">If checked, this item can be distributed without requiring warehouse stock (e.g., Vendor Direct).</p>
+                       </div>
+                     </label>
+                  </div>
               </div>
 
               <div className="flex space-x-3 pt-3">
@@ -548,7 +592,7 @@ export default function CatalogPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
           <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl p-6 text-center animate-in zoom-in-95">
             <div className="w-16 h-16 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center mx-auto mb-4 text-3xl">⚠️</div>
-            
+
             {deleteStep === 1 ? (
               <>
                 <h4 className="font-bold text-xl mb-2 text-slate-900">Delete Product?</h4>
@@ -604,7 +648,10 @@ export default function CatalogPage() {
                           {item.status === 'ERROR' && <span className="text-[10px] font-bold bg-rose-100 text-rose-700 px-2 py-1 rounded border border-rose-200">INVALID</span>}
                         </td>
                         <td className="p-3 font-mono text-xs font-bold text-slate-700">{item.code || 'N/A'}</td>
-                        <td className="p-3 font-bold text-slate-900">{item.name || 'Missing Name'}</td>
+                        <td className="p-3 font-bold text-slate-900">
+                            {item.name || 'Missing Name'}
+                            {item.is_open_stock && <span className="ml-2 px-1.5 py-0.5 text-[8px] bg-amber-100 text-amber-800 border border-amber-200 rounded font-black uppercase">Open Stock</span>}
+                        </td>
                         <td className="p-3 text-xs text-slate-600">{item.product_type}</td>
                       </tr>
                     ))

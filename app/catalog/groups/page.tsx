@@ -55,11 +55,11 @@ export default function ProductGroupsPage() {
     // Fetch ONLY Active Products for the Builder
     const { data: prodData } = await supabase
       .from('products')
-      .select('id, name, code, unit_type, product_type')
-      .eq('status', 'Active') // <--- New Logic: Only fetch Active products
+      .select('id, name, code, unit_type, product_type, is_open_stock') // Fetching new column if exists
+      .eq('status', 'Active') // Only fetch Active products
       .order('name');
     if (prodData) setProducts(prodData);
-    
+
     setIsLoading(false);
   };
 
@@ -128,9 +128,9 @@ export default function ProductGroupsPage() {
   const loadBagItems = async (groupId: string) => {
     const { data } = await supabase
       .from('product_group_items')
-      .select(`id, product_id, products (id, name, code, unit_type, product_type)`)
+      .select(`id, product_id, products (id, name, code, unit_type, product_type, is_open_stock)`)
       .eq('group_id', groupId);
-      
+
     if (data) {
       setBagItems(data.map(item => ({
         db_id: item.id,
@@ -175,9 +175,9 @@ export default function ProductGroupsPage() {
 
   return (
     <div className="flex flex-col h-full bg-slate-50 w-full animate-in fade-in duration-500 relative">
-      
+
       {/* Header */}
-      <header className="flex h-20 bg-white border-b border-slate-200 items-center px-4 md:px-6 shrink-0 shadow-sm z-10">
+      <header className="flex h-20 bg-white border-b border-slate-200 items-center px-4 md:px-6 shrink-0 shadow-sm z-20">
         <button onClick={() => window.history.back()} className="mr-4 p-2 rounded-full hover:bg-slate-100 text-slate-600 transition-colors flex items-center justify-center">
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" /></svg>
         </button>
@@ -187,8 +187,8 @@ export default function ProductGroupsPage() {
         </div>
       </header>
 
-      <div className="flex-1 overflow-y-auto p-4 md:p-6 grid grid-cols-1 xl:grid-cols-3 gap-6">
-        
+      <div className="flex-1 overflow-y-auto p-4 md:p-6 grid grid-cols-1 xl:grid-cols-3 gap-6 relative">
+
         {/* Toast Notification */}
         {msg.text && (
           <div className={`fixed top-24 left-1/2 -translate-x-1/2 z-50 p-4 rounded-xl shadow-lg border text-sm font-bold animate-in slide-in-from-top-2 flex items-center ${msg.type === 'error' ? 'bg-rose-50 text-rose-700 border-rose-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'}`}>
@@ -217,7 +217,7 @@ export default function ProductGroupsPage() {
               <label className="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1.5">Description (Optional)</label>
               <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={3} className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 font-medium outline-none focus:border-indigo-500 transition-colors resize-none" placeholder="What does this package contain?"></textarea>
             </div>
-            
+
             <button type="submit" className="w-full text-white bg-gradient-to-r from-indigo-600 to-cyan-600 py-3 rounded-xl text-sm font-bold shadow-md hover:shadow-lg transition-all mt-2">
               Save Package
             </button>
@@ -275,7 +275,7 @@ export default function ProductGroupsPage() {
 
       {/* ---------------- EDIT MODAL ---------------- */}
       {isEditModalOpen && editingGroup && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4 mt-16 md:mt-0">
           <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl overflow-hidden flex flex-col animate-in zoom-in-95">
             <div className="p-5 border-b border-slate-200 bg-slate-50 flex justify-between items-center shrink-0">
               <div>
@@ -284,7 +284,7 @@ export default function ProductGroupsPage() {
               </div>
               <button onClick={() => setIsEditModalOpen(false)} className="p-1.5 bg-white border border-slate-200 text-slate-500 rounded-lg hover:bg-slate-100"><Icons.Close /></button>
             </div>
-            
+
             <form onSubmit={handleSaveEdit} className="p-6 space-y-4">
                <div>
                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">Package Name</label>
@@ -298,7 +298,7 @@ export default function ProductGroupsPage() {
                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">Description (Optional)</label>
                  <textarea value={editDesc} onChange={(e) => setEditDesc(e.target.value)} rows={3} className="w-full px-4 py-2.5 bg-white border border-slate-300 rounded-xl text-sm text-slate-900 font-medium outline-none focus:border-indigo-500 transition-colors resize-none"></textarea>
                </div>
-               
+
                <button type="submit" disabled={isSavingEdit} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-xl text-sm transition-all shadow-md flex justify-center items-center mt-2 disabled:opacity-50">
                  {isSavingEdit ? <><Icons.Spinner /> Saving...</> : 'Save Changes'}
                </button>
@@ -309,9 +309,9 @@ export default function ProductGroupsPage() {
 
       {/* ---------------- 2-COLUMN BUILDER MODAL ---------------- */}
       {isBuilderOpen && activeGroup && (
-        <div className="absolute inset-0 z-50 flex flex-col bg-slate-900/70 backdrop-blur-sm p-2 md:p-6">
+        <div className="fixed inset-0 z-[100] flex flex-col bg-slate-900/70 backdrop-blur-sm p-2 md:p-6 mt-16 md:mt-0">
           <div className="bg-white w-full max-w-5xl mx-auto rounded-xl shadow-2xl border border-slate-200 flex flex-col flex-1 overflow-hidden h-full animate-in zoom-in-95">
-            
+
             <div className="p-3 md:p-4 border-b border-slate-200 bg-slate-900 text-white flex justify-between items-center shrink-0">
               <div className="flex items-center space-x-3">
                 <div className="bg-white/20 p-2 rounded-lg"><Icons.Catalog /></div>
@@ -322,9 +322,9 @@ export default function ProductGroupsPage() {
               </div>
               <button onClick={() => setIsBuilderOpen(false)} className="text-white bg-slate-800 p-1.5 rounded-lg hover:bg-slate-700 transition-colors"><Icons.Close /></button>
             </div>
-            
+
             <div className="flex-1 flex flex-col md:flex-row bg-slate-100 overflow-hidden">
-              
+
               {/* Left Column: Available Products */}
               <div className="w-full md:w-1/2 flex flex-col border-b md:border-b-0 md:border-r border-slate-200 bg-white">
                 <div className="p-4 border-b border-slate-100 bg-slate-50 shrink-0">
@@ -340,7 +340,7 @@ export default function ProductGroupsPage() {
                     />
                   </div>
                 </div>
-                
+
                 <div className="flex-1 overflow-y-auto p-3 space-y-2 custom-scrollbar">
                   {filteredProducts.length === 0 ? (
                     <div className="text-center text-xs font-bold text-slate-400 p-8">No active products found matching your search.</div>
@@ -352,7 +352,10 @@ export default function ProductGroupsPage() {
                             {product.product_type}
                           </span>
                           <div className="truncate">
-                            <p className="font-bold text-slate-900 text-sm truncate">{product.name}</p>
+                            <p className="font-bold text-slate-900 text-sm truncate flex items-center gap-2">
+                                {product.name}
+                                {product.is_open_stock && <span className="px-1.5 py-0.5 text-[8px] bg-amber-100 text-amber-800 border border-amber-200 rounded font-black">Open Stock</span>}
+                            </p>
                             <p className="text-[10px] text-slate-500 font-mono mt-0.5">Code: {product.code} | Unit: {product.unit_type}</p>
                           </div>
                         </div>
@@ -373,7 +376,7 @@ export default function ProductGroupsPage() {
                   </h4>
                   <span className="bg-indigo-600 text-white text-[10px] font-bold px-3 py-1 rounded-full shadow-sm">{bagItems.length} Added</span>
                 </div>
-                
+
                 <div className="flex-1 overflow-y-auto p-3 space-y-3 relative custom-scrollbar">
                   {bagItems.length === 0 ? (
                     <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400 text-center p-4">
@@ -390,6 +393,7 @@ export default function ProductGroupsPage() {
                               {item.product_type}
                             </span>
                             <span className="text-[9px] font-bold text-slate-400 font-mono uppercase tracking-wider">{item.unit_type}</span>
+                            {item.is_open_stock && <span className="px-1.5 py-0.5 text-[8px] bg-amber-100 text-amber-800 border border-amber-200 rounded font-black uppercase">Open Stock</span>}
                           </div>
                           <p className="font-bold text-slate-900 text-sm leading-tight">{item.name}</p>
                           <p className="text-[10px] text-slate-500 font-mono mt-0.5">Code: {item.code}</p>
@@ -414,7 +418,7 @@ export default function ProductGroupsPage() {
 
       {/* ---------------- DETAILS VIEW MODAL ---------------- */}
       {isDetailsOpen && activeGroup && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm px-4">
+        <div className="absolute inset-0 z-[100] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm px-4 mt-16 md:mt-0">
           <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl border border-slate-100 overflow-hidden flex flex-col max-h-[85vh] animate-in zoom-in-95 duration-200">
             <div className="p-5 border-b border-slate-100 flex justify-between items-center bg-slate-50/50 shrink-0">
               <div>
@@ -423,7 +427,7 @@ export default function ProductGroupsPage() {
               </div>
               <button onClick={() => setIsDetailsOpen(false)} className="text-slate-400 hover:text-slate-700 bg-white p-1.5 rounded-lg border border-slate-200 shadow-sm"><Icons.Close /></button>
             </div>
-            
+
             <div className="p-6 flex-1 overflow-y-auto custom-scrollbar">
                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3">Products included</h4>
                {bagItems.length === 0 ? (
@@ -437,7 +441,10 @@ export default function ProductGroupsPage() {
                            {item.product_type}
                          </span>
                          <div>
-                           <p className="text-sm font-bold text-slate-900">{item.name}</p>
+                           <p className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                             {item.name}
+                             {item.is_open_stock && <span className="px-1.5 py-0.5 text-[8px] bg-amber-100 text-amber-800 border border-amber-200 rounded font-black uppercase">Open</span>}
+                           </p>
                            <p className="text-[10px] text-slate-500 font-mono mt-0.5">{item.code}</p>
                          </div>
                        </div>

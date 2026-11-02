@@ -1,11 +1,17 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { usePathname } from "next/navigation";
 import "./globals.css";
 import Sidebar from "./components/Sidebar";
 import ProfileButton from "./components/ProfileButton";
 import { Plus_Jakarta_Sans } from 'next/font/google';
+import { createClient } from '@supabase/supabase-js';
+
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL || '', 
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
+);
 
 const jakarta = Plus_Jakarta_Sans({ 
   subsets: ['latin'],
@@ -13,10 +19,40 @@ const jakarta = Plus_Jakarta_Sans({
   display: 'swap',
 });
 
+// Fallback branding
+const DEFAULT_BRANDING = {
+    appName: "DP Management",
+    logoText: "DP"
+};
+
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [branding, setBranding] = useState({ appName: "Loading...", logoText: ".." });
   const pathname = usePathname();
   const isPublicPage = pathname === '/login' || pathname === '/';
+
+  useEffect(() => {
+    if (!isPublicPage) {
+        fetchBranding();
+    }
+  }, [isPublicPage]);
+
+  const fetchBranding = async () => {
+    try {
+        const { data } = await supabase.from('app_settings').select('settings').eq('id', 'login_page_design').single();
+        if (data?.settings && data.settings.logoText) {
+            setBranding({
+                appName: data.settings.logoText,
+                logoText: data.settings.logoText.substring(0, 2).toUpperCase()
+            });
+        } else {
+            setBranding(DEFAULT_BRANDING);
+        }
+    } catch (error) {
+        console.error("Error fetching branding for mobile header", error);
+        setBranding(DEFAULT_BRANDING);
+    }
+  };
 
   return (
     <html lang="en" suppressHydrationWarning>
@@ -35,8 +71,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                     <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" /></svg>
                   </button>
                   <div className="flex items-center space-x-2">
-                      <div className="w-8 h-8 bg-gradient-to-br from-indigo-500 to-cyan-500 rounded-lg flex items-center justify-center font-bold text-sm shadow-inner">NC</div>
-                      <span className="font-bold tracking-wide">NGO Connect</span>
+                      <div className="w-8 h-8 bg-gradient-to-br from-indigo-500 to-cyan-500 rounded-lg flex items-center justify-center font-bold text-sm shadow-inner">
+                          {branding.logoText}
+                      </div>
+                      <span className="font-bold tracking-wide">{branding.appName}</span>
                   </div>
                   <div className="w-8"></div>
                 </div>
