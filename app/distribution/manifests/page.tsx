@@ -302,9 +302,10 @@ export default function ManifestsPage() {
     });
   };
 
-  const filteredData = getFilteredManifests();
-  const todayDate = new Date();
-  todayDate.setHours(0, 0, 0, 0);
+const filteredData = getFilteredManifests();
+// Vercel pre-render error fix: Only calculate the date when needed during render
+const todayDate = typeof window !== 'undefined' ? new Date() : new Date("2026-01-01");
+todayDate.setHours(0, 0, 0, 0);
 
   const activeSection = filteredData.filter(m => {
     const validToDate = new Date(m.valid_to);
