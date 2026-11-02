@@ -3,9 +3,6 @@
 import React, { useState, useEffect } from 'react';
 import { Icons } from '../../components/Icons';
 import { createClient } from '@supabase/supabase-js';
-import * as XLSX from 'xlsx';
-import jsPDF from 'jspdf';
-import autoTable from 'jspdf-autotable';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL || '', 
@@ -19,7 +16,7 @@ export default function ProductTransferPage() {
   const [availableStock, setAvailableStock] = useState<any[]>([]);
   const [recentTransfers, setRecentTransfers] = useState<any[]>([]);
   const [currentUser, setCurrentUser] = useState<any>(null);
-  
+
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [msg, setMsg] = useState({ text: '', type: '' });
@@ -30,9 +27,9 @@ export default function ProductTransferPage() {
   const [destId, setDestId] = useState(''); 
   const [remarks, setRemarks] = useState('');
   const [referenceNo, setReferenceNo] = useState(''); 
-  
+
   const [transferItems, setTransferItems] = useState<any[]>([]);
-  
+
   // History Filters
   const [searchQuery, setSearchQuery] = useState('');
   const [historyWhFilter, setHistoryWhFilter] = useState('ALL');
@@ -46,13 +43,9 @@ export default function ProductTransferPage() {
 
   const [cancelModalOpen, setCancelModalOpen] = useState(false);
   const [transferToCancel, setTransferToCancel] = useState<any>(null);
-  
+
   const [detailsModalOpen, setDetailsModalOpen] = useState(false);
   const [selectedTransferDetails, setSelectedTransferDetails] = useState<any>(null);
-
-  const [bulkModalOpen, setBulkModalOpen] = useState(false);
-  const [parsedBulkData, setParsedBulkData] = useState<any[]>([]);
-  const [invalidRows, setInvalidRows] = useState<any[]>([]);
 
   useEffect(() => {
     fetchInitialData();
@@ -66,15 +59,14 @@ export default function ProductTransferPage() {
 
         const sessionStr = localStorage.getItem('user_session');
         const sessionUser = sessionStr ? JSON.parse(sessionStr) : null;
-        
+
         const { data: profile } = await supabase.from('profiles').select('role, user_roles(role_name)').eq('id', user?.id).single();
 
-        // Type assertion to bypass TS complaining about role_name
-const roleData: any = profile?.user_roles;
-const roleName = String(roleData?.role_name || profile?.role || sessionUser?.role || '').toUpperCase();
+        const roleData: any = profile?.user_roles;
+        const roleName = String(roleData?.role_name || profile?.role || sessionUser?.role || '').toUpperCase();
         const isSuperAdmin = roleName.includes('SUPER ADMIN') || roleName === 'ADMIN' || roleName.includes('WEB ADMIN');
 
-        // Bulletproof Logic for Fetching assigned_wh_ids (From OLD Code)
+        // Bulletproof Logic for Fetching assigned_wh_ids
         let rawIds = sessionUser?.assigned_wh_ids;
         if (!rawIds && user?.id) {
             const { data: pData } = await supabase.from('profiles').select('assigned_wh_ids').eq('id', user.id).single();
@@ -113,7 +105,6 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
 
         setAllWarehouses(whs); 
 
-        // Strictly Filter Source Warehouses based on Assignment (From OLD Code)
         if (isSuperAdmin) {
            setWarehouses(whs);
         } else {
@@ -121,8 +112,7 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
            setWarehouses(filteredWhs);
         }
         if (pts.length) setPartners(pts);
-        
-        // Fetch Transfers logic - Show if user's WH is Source OR Destination
+
         let tQuery = supabase.from('stock_transfers').select(`
             *,
             stock_transfer_items (
@@ -141,7 +131,7 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
         }
 
         const { data: transferResData } = await tQuery;
-        
+
         if (transferResData) {
           const mappedTransfers = transferResData.map(t => ({
             ...t,
@@ -209,102 +199,7 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
     setTransferItems(transferItems.filter(i => i.product_id !== productId));
   };
 
-  const downloadTemplate = () => {
-    const ws = XLSX.utils.json_to_sheet([{ "Product Code": "P-001", "Quantity": 100 }]);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Transfer Template");
-    XLSX.writeFile(wb, "Transfer_Upload_Template.xlsx");
-  };
-
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!sourceWh) {
-       showMessage("Select Source Warehouse first.", "error");
-       e.target.value = '';
-       return;
-    }
-
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (evt) => {
-      try {
-        const bstr = evt.target?.result;
-        const wb = XLSX.read(bstr, { type: 'binary' });
-        const wsname = wb.SheetNames[0];
-        const ws = wb.Sheets[wsname];
-        const rawData = XLSX.utils.sheet_to_json(ws, { raw: false }) as any[];
-
-        const validItems: any[] = [];
-        const invalid: any[] = [];
-
-        rawData.forEach((row, index) => {
-          let codeStr = row['Product Code'] || row['product code'] || row['Product_Code'];
-          let qty = parseInt(row['Quantity'] || row['quantity'] || '0', 10);
-          
-          if (codeStr && qty > 0) {
-             codeStr = codeStr.toString().trim();
-             const stockItem = availableStock.find(s => s.products.code === codeStr);
-             
-             if (stockItem) {
-                 const transferQty = qty > stockItem.quantity ? stockItem.quantity : qty;
-                 validItems.push({
-                    product_id: stockItem.product_id,
-                    products: stockItem.products,
-                    max_qty: stockItem.quantity,
-                    transfer_qty: transferQty,
-                    requested_qty: qty
-                 });
-             } else {
-                 invalid.push({ row: index + 2, code: codeStr, error: 'Not in stock' });
-             }
-          } else {
-             if(codeStr) invalid.push({ row: index + 2, code: codeStr, error: 'Invalid Qty' });
-          }
-        });
-
-        const mergedValid: any[] = [];
-        validItems.forEach(item => {
-            const existing = mergedValid.find(v => v.product_id === item.product_id);
-            if (existing) {
-                existing.transfer_qty += item.transfer_qty;
-                if(existing.transfer_qty > existing.max_qty) existing.transfer_qty = existing.max_qty;
-            } else {
-                mergedValid.push(item);
-            }
-        });
-
-        setParsedBulkData(mergedValid);
-        setInvalidRows(invalid);
-        setBulkModalOpen(true);
-      } catch (error) {
-        showMessage("Error parsing Excel file.", "error");
-      }
-      e.target.value = '';
-    };
-    reader.readAsBinaryString(file);
-  };
-
-  const confirmBulkUpload = () => {
-     const newBag = [...transferItems];
-     parsedBulkData.forEach(item => {
-         const existing = newBag.find(b => b.product_id === item.product_id);
-         if (existing) {
-             existing.transfer_qty += item.transfer_qty;
-             if(existing.transfer_qty > existing.max_qty) existing.transfer_qty = existing.max_qty;
-         } else {
-             newBag.push(item);
-         }
-     });
-     
-     setTransferItems(newBag);
-     setBulkModalOpen(false);
-     setParsedBulkData([]);
-     setInvalidRows([]);
-     showMessage(`${parsedBulkData.length} items added to bag.`, "success");
-  };
-
-  // 🚀 DIRECT STORE LOGIC (Removed "In Transit")
+  // 🚀 DIRECT STORE LOGIC
   const handleSubmitTransfer = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!sourceWh || transferItems.length === 0) {
@@ -323,8 +218,8 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
     setIsSubmitting(true);
 
     try {
-      const statusStr = 'Completed'; // Direct complete!
-      
+      const statusStr = 'Completed'; 
+
       // 1. Create Transfer Header
       const { data: transferData, error: transferError } = await supabase
         .from('stock_transfers')
@@ -382,7 +277,7 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
             } else {
                 await supabase.from('inventory').insert([{ warehouse_id: destId, product_id: item.product_id, quantity: item.transfer_qty }]);
             }
-            
+
             ledgerEntries.push({
               warehouse_id: destId,
               product_id: item.product_id,
@@ -401,7 +296,7 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
       await supabase.from('inventory_transactions').insert(ledgerEntries);
 
       showMessage(`Transfer Completed Successfully! System ID: ${txnIdString}`, "success");
-      
+
       setDestId(''); setRemarks(''); setTransferItems([]); setReferenceNo('');
       fetchAvailableStock(sourceWh);
       await fetchInitialData();
@@ -425,7 +320,7 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
     setIsSubmitting(true);
     try {
       const { data: items } = await supabase.from('stock_transfer_items').select('*').eq('transfer_id', transferToCancel.id);
-      
+
       if (items) {
         for (const item of items) {
           // Revert Source WH (Add stock back)
@@ -446,7 +341,7 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
 
       // Delete BOTH IN and OUT transactions for this transfer
       await supabase.from('inventory_transactions').delete().eq('transfer_id', transferToCancel.id);
-      
+
       await supabase.from('stock_transfers').update({ 
         status: 'Cancelled',
         updated_by: currentUser?.id || null,
@@ -468,7 +363,7 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
 
   const openEditModal = async (transfer: any) => {
     if (transfer.status === 'Cancelled') return;
-    
+
     setTransferToEdit(transfer);
     setEditDate(transfer.transfer_date || '');
     setEditRemarks(transfer.remarks || '');
@@ -480,7 +375,7 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
       .from('stock_transfer_items')
       .select(`id, product_id, quantity, products(name, code, unit_type)`)
       .eq('transfer_id', transfer.id);
-    
+
     if (data) {
       const productIds = data.map(d => d.product_id);
       const { data: invData } = await supabase
@@ -493,7 +388,7 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
         const inv = invData?.find(i => i.product_id === item.product_id);
         const currentStock = inv ? inv.quantity : 0;
         const maxCapacity = currentStock + item.quantity; 
-        
+
         return {
           ...item,
           current_stock: currentStock,
@@ -519,7 +414,7 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
       showMessage("All transferred items must have a valid quantity greater than 0.", "error");
       return;
     }
-    
+
     setIsSubmitting(true);
 
     try {
@@ -546,7 +441,7 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
              const { data: targetInv } = await supabase.from('inventory')
                 .select('id, quantity').eq('warehouse_id', transferToEdit.to_warehouse_id)
                 .eq('product_id', item.product_id).single();
-             
+
              if (targetInv) {
                 await supabase.from('inventory').update({ quantity: Math.max(0, targetInv.quantity + diff) }).eq('id', targetInv.id);
              }
@@ -581,7 +476,7 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
 
       showMessage("Transfer details updated and stock re-adjusted everywhere!", "success");
       setEditModalOpen(false);
-      
+
       if(sourceWh === transferToEdit.from_warehouse_id) fetchAvailableStock(sourceWh);
       await fetchInitialData();
     } catch (err: any) {
@@ -591,86 +486,9 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
     }
   };
 
-  const handleExportExcel = () => {
-    const exportData: any[] = [];
-    
-    filteredTransfers.forEach(t => {
-      const destName = t.destination_type === 'WH' ? t.to_warehouse?.name : (t.destination_type === 'PARTNER' ? t.to_partner?.name : 'Contingency Stock');
-      const txnId = `TXN-${t.id.split('-')[0].toUpperCase()}`;
-      
-      if (t.stock_transfer_items && t.stock_transfer_items.length > 0) {
-        t.stock_transfer_items.forEach((item: any) => {
-          exportData.push({
-            "Date": new Date(t.transfer_date).toLocaleDateString(),
-            "System TXN ID": txnId,
-            "PO / Ref No": t.reference_no || 'N/A',
-            "Source Warehouse": t.from_warehouse?.name || 'Unknown',
-            "Target Destination": destName || '',
-            "Destination Type": t.destination_type,
-            "Status": t.status,
-            "Product Code": item.products?.code || 'N/A',
-            "Product Name": item.products?.name || 'Unknown',
-            "Quantity": item.quantity,
-            "Unit": item.products?.unit_type || '',
-            "Remarks / Details": t.remarks || 'N/A',
-            "Created By (Email)": t.created_by_email || 'System',
-            "Last Updated By": t.updated_by_email || 'N/A'
-          });
-        });
-      }
-    });
-
-    const worksheet = XLSX.utils.json_to_sheet(exportData);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Transfer_Details");
-    XLSX.writeFile(workbook, `Stock_Transfer_Details_${new Date().toISOString().split('T')[0]}.xlsx`);
-  };
-
-  const handleExportPDF = () => {
-    const doc = new jsPDF('landscape');
-    doc.setFontSize(14); doc.setTextColor(30, 41, 59); 
-    doc.text("Stock Transfer/Direct Store - Detailed Audit Report", 14, 15);
-    doc.setFontSize(9); doc.setTextColor(100, 116, 139); 
-    doc.text(`Generated on: ${new Date().toLocaleString()}`, 14, 21);
-
-    const tableColumn = [
-      "Date & Time", "TXN ID & PO", "Source WH", "Destination", "Product Details", "Qty", "Status", "Remarks", "User Audit"
-    ];
-    const tableRows: any[] = [];
-
-    filteredTransfers.forEach(t => {
-      const destName = t.destination_type === 'WH' ? t.to_warehouse?.name : (t.destination_type === 'PARTNER' ? t.to_partner?.name : 'Contingency Stock');
-      const txnId = `TXN-${t.id.split('-')[0].toUpperCase()}`;
-      const dateStr = new Date(t.transfer_date).toLocaleDateString();
-      const timeStr = t.created_at ? new Date(t.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
-      
-      const createdAudit = `Cr: ${t.created_by_email || 'System'}`;
-      const updatedAudit = t.updated_by_email ? `\nUpd: ${t.updated_by_email} (${new Date(t.updated_at).toLocaleDateString()})` : '';
-      
-      if (t.stock_transfer_items && t.stock_transfer_items.length > 0) {
-        t.stock_transfer_items.forEach((item: any) => {
-          tableRows.push([
-            `${dateStr}\n${timeStr}`,
-            `${txnId}${t.reference_no ? `\nPO: ${t.reference_no}` : ''}`,
-            t.from_warehouse?.name || 'Unknown',
-            `${destName || 'N/A'}\n(${t.destination_type})`,
-            `${item.products?.name || 'Unknown'}\n[${item.products?.code || 'N/A'}]`,
-            `${item.quantity} ${item.products?.unit_type || ''}`,
-            t.status,
-            t.remarks || '-',
-            `${createdAudit}${updatedAudit}`
-          ]);
-        });
-      }
-    });
-
-    autoTable(doc, {
-      head: [tableColumn], body: tableRows, startY: 26, theme: 'grid',
-      styles: { fontSize: 7.5, cellPadding: 2.5, overflow: 'linebreak' },
-      headStyles: { fillColor: [79, 70, 229], textColor: [255, 255, 255], fontStyle: 'bold' },
-      alternateRowStyles: { fillColor: [248, 250, 252] },
-    });
-    doc.save(`Stock_Transfer_Detailed_Report_${new Date().toISOString().split('T')[0]}.pdf`);
+  // Helper function to prevent scroll on number inputs
+  const preventScroll = (e: React.WheelEvent<HTMLInputElement>) => {
+    (e.target as HTMLInputElement).blur();
   };
 
   const filteredTransfers = recentTransfers.filter(t => {
@@ -678,7 +496,7 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
     const destName = t.destination_type === 'WH' ? t.to_warehouse?.name : (t.destination_type === 'PARTNER' ? t.to_partner?.name : 'Contingency Stock');
     const txnMatch = t.id.toLowerCase().includes(query);
     const poMatch = (t.reference_no || '').toLowerCase().includes(query);
-    
+
     const searchCondition = txnMatch || poMatch ||
            (t.from_warehouse?.name || '').toLowerCase().includes(query) ||
            (destName || '').toLowerCase().includes(query);
@@ -692,7 +510,19 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
 
   return (
     <div className="flex flex-col h-full bg-slate-50 w-full animate-in fade-in duration-500 relative">
-      
+
+      {/* Global style to hide number input arrows (spinners) */}
+      <style dangerouslySetInnerHTML={{__html: `
+        input[type="number"]::-webkit-inner-spin-button,
+        input[type="number"]::-webkit-outer-spin-button {
+          -webkit-appearance: none;
+          margin: 0;
+        }
+        input[type="number"] {
+          -moz-appearance: textfield;
+        }
+      `}} />
+
       <header className="flex h-20 bg-white border-b border-slate-200 items-center px-4 md:px-6 shrink-0 shadow-sm z-10">
         <button onClick={() => window.history.back()} className="mr-4 p-2 rounded-full hover:bg-slate-100 text-slate-600 transition-colors flex items-center justify-center">
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" /></svg>
@@ -703,8 +533,8 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
         </div>
       </header>
 
-      <div className="flex-1 overflow-y-auto p-4 md:p-6 flex flex-col space-y-6">
-        
+      <div className="flex-1 overflow-y-auto p-4 md:p-6 flex flex-col space-y-6 custom-scrollbar">
+
         {msg.text && (
           <div className={`p-4 rounded-xl shadow-md border text-sm font-bold animate-in slide-in-from-top-2 flex justify-between items-center shrink-0 fixed top-24 left-1/2 -translate-x-1/2 z-50 w-[90%] max-w-md ${msg.type === 'error' ? 'bg-rose-50 text-rose-700 border-rose-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'}`}>
             <span className="flex items-center"><span className="mr-2 text-lg">{msg.type === 'error' ? '⚠️' : '✅'}</span> {msg.text}</span>
@@ -713,13 +543,13 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
         )}
 
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 shrink-0">
-          
+
           <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm xl:col-span-1 h-fit flex flex-col">
             <h3 className="text-lg font-bold text-slate-900 mb-5 flex items-center">
               <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center mr-3"><Icons.Upload /></div>
               Issue Details
             </h3>
-            
+
             <form id="transfer-form" onSubmit={handleSubmitTransfer} className="space-y-4">
               <div>
                 <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">Date</label>
@@ -825,19 +655,10 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
                        <Icons.Manifest /> <span className="ml-2">Issue Bag</span>
                      </h4>
                      <div className="flex items-center space-x-2">
-                        <button onClick={downloadTemplate} title="Download Excel Template" className="p-1.5 bg-white text-indigo-600 rounded-md shadow-sm border border-indigo-200 hover:bg-indigo-600 hover:text-white transition-colors">
-                           <Icons.Download />
-                        </button>
-                        <div className="relative">
-                           <input type="file" accept=".xlsx, .xls" onChange={handleFileUpload} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" title="Upload Bulk Excel" />
-                           <button className="px-3 py-1 bg-white text-indigo-600 font-bold text-[10px] uppercase rounded-md shadow-sm border border-indigo-200 pointer-events-none">
-                              Bulk Upload
-                           </button>
-                        </div>
                         <span className="bg-indigo-600 text-white text-[10px] font-bold px-2 py-1 rounded-full">{transferItems.length} Items</span>
                      </div>
                    </div>
-                   
+
                    <div className="flex-1 overflow-y-auto p-3 space-y-3 custom-scrollbar relative">
                      {transferItems.length === 0 ? (
                        <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400 text-center p-4">
@@ -863,6 +684,7 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
                                  type="number" min="1" max={item.max_qty}
                                  value={item.transfer_qty || ''} 
                                  onChange={(e) => handleUpdateTransferQty(item.product_id, e.target.value)}
+                                 onWheel={preventScroll}
                                  className="w-20 text-right px-2 py-1 bg-white border border-slate-300 rounded-md text-xs font-bold text-emerald-700 outline-none focus:border-emerald-500"
                                />
                              </div>
@@ -886,30 +708,14 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
            <div className="p-4 border-b border-slate-100 flex flex-col lg:flex-row justify-between items-center bg-slate-50/50 gap-4">
               <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wide">Recent Transfers / Issues</h3>
               <div className="flex flex-col sm:flex-row items-center space-y-3 sm:space-y-0 sm:space-x-3 w-full lg:w-auto">
-                 <div className="w-full sm:w-auto">
-                   <select value={historyWhFilter} onChange={(e) => setHistoryWhFilter(e.target.value)} className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-900 outline-none focus:border-indigo-500">
-                     <option value="ALL">All My Warehouses</option>
-                     {warehouses.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
-                   </select>
-                 </div>
-
                  <div className="relative w-full sm:w-64">
                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"><Icons.Search /></div>
                    <input type="text" placeholder="Search TXN, Source, Dest..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} className="w-full pl-10 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-900 outline-none focus:border-indigo-500" />
                  </div>
-                 
-                 <div className="flex space-x-2 shrink-0">
-                   <button onClick={handleExportExcel} className="flex px-4 py-2 bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-bold rounded-xl hover:bg-emerald-100 transition-colors shadow-sm">
-                     <Icons.Download /> <span className="ml-1 hidden sm:inline">Excel</span>
-                   </button>
-                   <button onClick={handleExportPDF} className="flex px-4 py-2 bg-rose-50 text-rose-700 border border-rose-200 text-xs font-bold rounded-xl hover:bg-rose-100 transition-colors shadow-sm">
-                     <Icons.Download /> <span className="ml-1 hidden sm:inline">PDF</span>
-                   </button>
-                 </div>
               </div>
            </div>
-           
-           <div className="overflow-x-auto w-full">
+
+           <div className="overflow-x-auto w-full custom-scrollbar">
              <table className="w-full text-left border-collapse table-auto min-w-[900px]">
                 <thead className="bg-slate-50 border-b border-slate-200">
                   <tr>
@@ -931,7 +737,7 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
                       const isDisabled = t.status === 'Cancelled' || t.status === 'Rejected';
                       const txnId = `TXN-${t.id.split('-')[0].toUpperCase()}`;
                       const totalQty = t.stock_transfer_items?.reduce((sum: number, i: any) => sum + i.quantity, 0) || 0;
-                      
+
                       return (
                         <tr key={t.id} className={`hover:bg-slate-50 group transition-colors ${isDisabled ? 'grayscale opacity-70' : ''}`}>
                           <td className="px-4 py-3 align-top">
@@ -939,12 +745,12 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
                             <p className="text-[10px] text-indigo-600 font-mono mt-0.5 font-bold">{txnId}</p>
                             {t.reference_no && <p className="text-[9px] text-slate-400 mt-0.5">PO: {t.reference_no}</p>}
                           </td>
-                          
+
                           <td className="px-4 py-3 align-top">
                              <p className="font-bold text-slate-900 text-sm">{t.from_warehouse?.name || 'Unknown'}</p>
                              <p className="text-[10px] text-slate-500 mt-0.5">Code: {t.from_warehouse?.code || 'N/A'}</p>
                           </td>
-                          
+
                           <td className="px-4 py-3 align-top">
                              {t.destination_type === 'WH' && (
                                <><span className="text-[8px] font-bold bg-indigo-50 text-indigo-700 px-1.5 py-0.5 rounded border border-indigo-100 mb-1 inline-block uppercase">WAREHOUSE</span>
@@ -959,7 +765,7 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
                                <p className="font-bold text-slate-900 text-sm">Contingency Stock</p></>
                              )}
                           </td>
-                          
+
                           <td className="px-4 py-3 text-right align-top">
                              <div className="flex flex-col items-end justify-start">
                                <div className="flex items-baseline space-x-1">
@@ -975,7 +781,7 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
                                {t.status}
                              </span>
                           </td>
-                          
+
                           <td className="px-4 py-3 align-top text-right">
                              <div className="flex justify-end items-center">
                                <button onClick={() => { setSelectedTransferDetails(t); setDetailsModalOpen(true); }} className="px-2 py-1.5 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 rounded-lg text-[10px] font-bold border border-indigo-100 transition-colors mr-2 whitespace-nowrap">
@@ -1000,7 +806,7 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
       </div>
 
       {detailsModalOpen && selectedTransferDetails && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4 mt-16 md:mt-0">
           <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl overflow-hidden flex flex-col animate-in zoom-in-95">
             <div className="p-5 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
               <div>
@@ -1009,9 +815,9 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
               </div>
               <button onClick={() => setDetailsModalOpen(false)} className="text-slate-400 hover:text-slate-700 bg-white p-1.5 rounded-lg border border-slate-200"><Icons.Close /></button>
             </div>
-            
+
             <div className="p-6 space-y-4 max-h-[70vh] overflow-y-auto custom-scrollbar">
-               
+
                <div className="grid grid-cols-2 gap-4 bg-slate-50 p-4 rounded-xl border border-slate-100">
                  <div>
                    <p className="text-[9px] font-bold text-slate-500 uppercase">Transfer Date</p>
@@ -1065,7 +871,7 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
       )}
 
       {editModalOpen && transferToEdit && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4 mt-16 md:mt-0">
           <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl overflow-hidden flex flex-col animate-in zoom-in-95">
             <div className="p-5 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
               <div>
@@ -1074,8 +880,8 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
               </div>
               <button onClick={() => setEditModalOpen(false)} className="text-slate-400 hover:text-slate-700 bg-white p-1.5 rounded-lg border border-slate-200"><Icons.Close /></button>
             </div>
-            
-            <form onSubmit={handleSaveEdit} className="p-6 space-y-4">
+
+            <form onSubmit={handleSaveEdit} className="p-6 space-y-4 max-h-[70vh] overflow-y-auto custom-scrollbar">
                <div>
                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">Transfer Date</label>
                  <input type="date" value={editDate} onChange={(e) => setEditDate(e.target.value)} required className="w-full px-4 py-2.5 bg-white border border-slate-300 rounded-xl text-sm text-slate-900 font-bold outline-none focus:border-indigo-500 transition-colors" />
@@ -1104,6 +910,7 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
                                  const val = parseInt(e.target.value) || 0;
                                  setEditItems(editItems.map((i, currIdx) => currIdx === idx ? { ...i, quantity: val } : i));
                                }}
+                               onWheel={preventScroll}
                                className="w-16 text-right px-2 py-1.5 bg-white border border-slate-300 rounded-md text-sm font-bold text-indigo-700 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition-all"
                              />
                              <span className="text-[10px] text-slate-500 uppercase font-bold w-8">{item.products?.unit_type}</span>
@@ -1118,7 +925,7 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">Remarks / Details</label>
                  <input type="text" value={editRemarks} onChange={(e) => setEditRemarks(e.target.value)} className="w-full px-4 py-2.5 bg-white border border-slate-300 rounded-xl text-sm text-slate-900 font-bold outline-none focus:border-indigo-500 transition-colors" />
                </div>
-               
+
                <button type="submit" disabled={isSubmitting} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-xl text-sm transition-all shadow-md flex justify-center items-center mt-2 disabled:opacity-50">
                  {isSubmitting ? <><Icons.Spinner /> Saving...</> : 'Save Changes & Update DB'}
                </button>
@@ -1128,13 +935,13 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
       )}
 
       {cancelModalOpen && transferToCancel && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4 mt-16 md:mt-0">
           <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl overflow-hidden flex flex-col animate-in zoom-in-95">
             <div className="p-5 border-b border-rose-100 bg-rose-50 flex justify-between items-center">
               <h3 className="font-bold text-rose-900">Delete & Revert Stock</h3>
               <button onClick={() => setCancelModalOpen(false)} className="text-rose-400 hover:text-rose-700 bg-white p-1.5 rounded-lg border border-rose-200"><Icons.Close /></button>
             </div>
-            
+
             <div className="p-6 text-center">
                <div className="w-16 h-16 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center mx-auto mb-4 text-2xl">⚠️</div>
                <h4 className="text-lg font-bold text-slate-900 mb-2">Are you sure?</h4>
@@ -1151,6 +958,7 @@ const roleName = String(roleData?.role_name || profile?.role || sessionUser?.rol
           </div>
         </div>
       )}
+
     </div>
   );
 }

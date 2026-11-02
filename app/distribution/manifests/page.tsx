@@ -487,7 +487,7 @@ export default function ManifestsPage() {
   const openDetailsView = async (manifest: any) => {
     setActiveManifest(manifest);
     setIsDetailsOpen(true);
-    const { data } = await supabase.from('manifest_items').select(`id, target_qty, distributed_qty, product_id, sort_order, products (name, code, unit_type, product_type)`).eq('manifest_id', manifest.id);
+    const { data } = await supabase.from('manifest_items').select(`id, target_qty, distributed_qty, product_id, sort_order, products (name, code, unit_type, product_type, is_open_stock)`).eq('manifest_id', manifest.id);
     if (data) {
         const sorted = data.sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
         setDetailsItems(sorted);
@@ -498,15 +498,15 @@ export default function ManifestsPage() {
     setActiveManifest(manifest);
     setIsBuilderOpen(true);
     setProductSearch('');
-    const { data: prodData } = await supabase.from('products').select('id, name, code, unit_type, product_type').order('name');
+    const { data: prodData } = await supabase.from('products').select('id, name, code, unit_type, product_type, is_open_stock').order('name');
     if (prodData) setAllProducts(prodData);
-    const { data: pkgData } = await supabase.from('product_groups').select(`id, group_name, group_code, product_group_items( product_id, products(id, name, code, unit_type, product_type) )`);
+    const { data: pkgData } = await supabase.from('product_groups').select(`id, group_name, group_code, product_group_items( product_id, products(id, name, code, unit_type, product_type, is_open_stock) )`);
     if (pkgData) setAllPackages(pkgData);
     await loadBagItems(manifest.id);
   };
 
   const loadBagItems = async (manifestId: string) => {
-    const { data } = await supabase.from('manifest_items').select(`id, target_qty, product_id, sort_order, products (id, name, code, unit_type, product_type)`).eq('manifest_id', manifestId);
+    const { data } = await supabase.from('manifest_items').select(`id, target_qty, product_id, sort_order, products (id, name, code, unit_type, product_type, is_open_stock)`).eq('manifest_id', manifestId);
     if (data) {
         const sorted = data.sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
         setBagItems(sorted.map(item => ({ db_id: item.id, product_id: item.product_id, target_qty: item.target_qty, ...item.products })));
@@ -579,8 +579,25 @@ export default function ManifestsPage() {
     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
   );
 
+  // Helper function to prevent scroll on number inputs
+  const preventScroll = (e: React.WheelEvent<HTMLInputElement>) => {
+    (e.target as HTMLInputElement).blur();
+  };
+
   return (
     <div className="flex flex-col h-full w-full animate-in fade-in duration-500 relative bg-slate-50">
+
+      {/* Global style to hide number input arrows (spinners) */}
+      <style dangerouslySetInnerHTML={{__html: `
+        input[type="number"]::-webkit-inner-spin-button,
+        input[type="number"]::-webkit-outer-spin-button {
+          -webkit-appearance: none;
+          margin: 0;
+        }
+        input[type="number"] {
+          -moz-appearance: textfield;
+        }
+      `}} />
 
       {/* Header with Back Button */}
       <header className="flex h-20 bg-white border-b border-slate-200 items-center px-4 md:px-6 shrink-0 z-20 shadow-sm">
@@ -1046,7 +1063,7 @@ export default function ManifestsPage() {
 
       {/* ---------------- DETAILS MODAL ---------------- */}
       {isDetailsOpen && activeManifest && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4 mt-16 md:mt-0">
           <div className="bg-white w-full max-w-4xl rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[85vh] md:max-h-[90vh] animate-in zoom-in-95">
             <div className="p-5 border-b border-slate-200 bg-slate-50 flex justify-between items-center shrink-0">
               <div>
@@ -1125,7 +1142,7 @@ export default function ManifestsPage() {
 
       {/* ---------------- BUILDER MODAL ---------------- */}
       {isBuilderOpen && activeManifest && (
-        <div className="fixed inset-0 z-[100] flex flex-col bg-slate-900/70 backdrop-blur-sm p-2 md:p-6">
+        <div className="fixed inset-0 z-[100] flex flex-col bg-slate-900/70 backdrop-blur-sm p-2 md:p-6 mt-16 md:mt-0">
           <div className="bg-white w-full max-w-6xl mx-auto rounded-xl shadow-2xl border border-slate-200 flex flex-col flex-1 overflow-hidden h-full animate-in zoom-in-95">
             <div className="p-3 md:p-4 border-b border-slate-200 bg-slate-900 text-white flex justify-between items-center shrink-0">
               <div className="flex items-center space-x-2">
@@ -1158,7 +1175,7 @@ export default function ManifestsPage() {
                     filteredProducts.map(product => (
                       <div key={product.id} className="flex items-center justify-between p-3 border-2 border-slate-200 rounded-xl bg-slate-50 hover:border-indigo-300 transition-colors">
                         <div className="flex items-center space-x-2 truncate pr-2">
-                          <span className={`text-[8px] font-black px-1.5 py-0.5 rounded uppercase border ${product.product_type === 'LPG' ? 'bg-orange-100 text-orange-800 border-orange-200' : 'bg-emerald-100 text-emerald-800 border-emerald-200'}`}>{product.product_type}</span>
+                          <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded uppercase border ${product.product_type === 'LPG' ? 'bg-orange-100 text-orange-800 border-orange-200' : 'bg-emerald-100 text-emerald-800 border-emerald-200'}`}>{product.product_type}</span>
                           <div className="truncate">
                             <p className="font-black text-black text-xs truncate">{product.name}</p>
                             <p className="text-[9px] text-slate-600 font-mono mt-0.5 font-bold">Code: {product.code} | Unit: {product.unit_type}</p>
@@ -1226,7 +1243,13 @@ export default function ManifestsPage() {
                         <div className="flex items-center justify-between bg-slate-50 p-2 rounded-lg border-2 border-slate-200 ml-6">
                           <span className="text-[10px] font-black text-slate-600 uppercase">Target Qty:</span>
                           <div className="flex items-center space-x-2">
-                            <input type="number" min="0" placeholder="0 = Open" value={item.target_qty || ''} onChange={(e) => handleUpdateQty(item.db_id, e.target.value)} className="w-20 text-right px-2 py-1 bg-white border-2 border-slate-300 rounded-md text-xs font-bold text-black outline-none focus:border-indigo-600 shadow-sm" />
+                            <input 
+                                type="number" min="0" placeholder="0 = Open" 
+                                value={item.target_qty || ''} 
+                                onChange={(e) => handleUpdateQty(item.db_id, e.target.value)} 
+                                onWheel={preventScroll}
+                                className="w-20 text-right px-2 py-1 bg-white border-2 border-slate-300 rounded-md text-xs font-bold text-black outline-none focus:border-indigo-600 shadow-sm" 
+                            />
                             <span className="text-[9px] font-black text-slate-500 uppercase w-8">{item.unit_type}</span>
                           </div>
                         </div>

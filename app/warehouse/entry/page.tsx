@@ -348,6 +348,11 @@ export default function BulkEntryPage() {
     } catch (error) { showMessage("Failed to revert.", "error"); } finally { setIsSavingEdit(false); }
   };
 
+  // Helper function to prevent scroll on number inputs
+  const preventScroll = (e: React.WheelEvent<HTMLInputElement>) => {
+    (e.target as HTMLInputElement).blur();
+  };
+
   // --- UI FILTERING LOGIC ---
   const filteredProducts = products.filter(p => p.name.toLowerCase().includes(productSearch.toLowerCase()) || p.code.toLowerCase().includes(productSearch.toLowerCase()));
   
@@ -387,7 +392,8 @@ export default function BulkEntryPage() {
     doc.setFontSize(14); doc.text("Bulk Stock Entry - History", 14, 15);
     const tableColumn = ["Date & TXN", "Warehouse", "Product", "Qty (IN)", "Status"];
     const tableRows = filteredTransactions.map(t => [
-      `${new Date(t.created_at).toLocaleDateString()}\nTXN-${t.id.split('-')[0].toUpperCase()}`,
+      `${new Date(t.created_at).toLocaleDateString()}
+TXN-${t.id.split('-')[0].toUpperCase()}`,
       t.warehouses?.name || 'Unknown',
       t.products?.name || 'Unknown',
       `+${t.quantity} ${t.products?.unit_type || ''}`,
@@ -403,6 +409,19 @@ export default function BulkEntryPage() {
 
   return (
     <div className="flex flex-col h-full bg-slate-50 w-full animate-in fade-in duration-500 relative">
+      
+      {/* Global style to hide number input arrows (spinners) */}
+      <style dangerouslySetInnerHTML={{__html: `
+        input[type="number"]::-webkit-inner-spin-button,
+        input[type="number"]::-webkit-outer-spin-button {
+          -webkit-appearance: none;
+          margin: 0;
+        }
+        input[type="number"] {
+          -moz-appearance: textfield;
+        }
+      `}} />
+
       <header className="flex h-20 bg-white border-b border-slate-200 items-center px-4 md:px-6 shrink-0 shadow-sm justify-between">
         <div className="flex items-center">
             <button onClick={() => window.history.back()} className="mr-4 p-2 rounded-full hover:bg-slate-100 text-slate-600 transition-colors flex items-center justify-center">
@@ -426,7 +445,7 @@ export default function BulkEntryPage() {
         </div>
       </header>
 
-      <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6">
+      <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 custom-scrollbar">
         
         {/* Toast Message */}
         {msg.text && (
@@ -481,7 +500,7 @@ export default function BulkEntryPage() {
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col md:flex-row h-[560px] overflow-hidden">
           
           {/* Left: Products */}
-          <div className="w-full md:w-1/2 flex flex-col border-b md:border-b-0 md:border-r border-slate-200 bg-slate-50/50">
+          <div className="w-full md:w-1/2 flex flex-col border-b md:border-b-0 md:border-r border-slate-200 bg-slate-50/50 h-1/2 md:h-full">
             <div className="p-4 border-b border-slate-200 bg-white shrink-0">
                <h4 className="font-bold text-slate-800 text-xs uppercase tracking-wide mb-3">Available Products</h4>
                <input 
@@ -513,7 +532,7 @@ export default function BulkEntryPage() {
           </div>
 
           {/* Right: Entry Bag + Bottom Fields */}
-          <div className="w-full md:w-1/2 flex flex-col bg-white" onDragOver={(e) => e.preventDefault()} onDrop={handleDrop}>
+          <div className="w-full md:w-1/2 flex flex-col bg-white h-1/2 md:h-full" onDragOver={(e) => e.preventDefault()} onDrop={handleDrop}>
             <div className="p-4 border-b border-emerald-100 bg-emerald-50 shrink-0 flex justify-between items-center">
                <h4 className="font-bold text-emerald-900 text-xs uppercase tracking-wide flex items-center">
                  <span className="mr-2 text-base">📥</span> Entry Bag
@@ -544,6 +563,7 @@ export default function BulkEntryPage() {
                            type="number" min="1"
                            value={item.qty} 
                            onChange={(e) => handleUpdateQty(item.product_id, e.target.value)}
+                           onWheel={preventScroll}
                            className="w-20 text-right px-2 py-1 bg-white border border-slate-300 rounded-md text-xs font-bold text-emerald-700 outline-none focus:border-emerald-500"
                            placeholder="0"
                          />
@@ -603,7 +623,7 @@ export default function BulkEntryPage() {
               </div>
            </div>
            
-           <div className="overflow-x-auto w-full">
+           <div className="overflow-x-auto w-full custom-scrollbar">
              <table className="w-full text-left border-collapse table-auto min-w-[900px]">
                 <thead className="bg-slate-50 border-b border-slate-200">
                   <tr>
@@ -752,7 +772,7 @@ export default function BulkEntryPage() {
 
       {/* --- EDIT MODAL --- */}
       {isEditModalOpen && editingTxn && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4 mt-16 md:mt-0">
           <div className="bg-white w-full max-w-sm rounded-2xl shadow-2xl flex flex-col animate-in zoom-in-95">
              <div className="p-5 border-b border-slate-200 bg-slate-50 flex justify-between items-center rounded-t-2xl">
                <div>
@@ -775,6 +795,7 @@ export default function BulkEntryPage() {
                        type="number" min="1" 
                        value={editQty} 
                        onChange={(e) => setEditQty(e.target.value ? Number(e.target.value) : '')}
+                       onWheel={preventScroll}
                        required
                        className="w-full text-lg font-black text-emerald-700 px-4 py-2 border-2 border-slate-200 rounded-xl outline-none focus:border-emerald-500 text-center"
                      />
@@ -792,7 +813,7 @@ export default function BulkEntryPage() {
 
       {/* --- REVERT MODAL --- */}
       {revertModalOpen && txnToRevert && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4 mt-16 md:mt-0">
           <div className="bg-white w-full max-w-sm rounded-2xl shadow-2xl flex flex-col animate-in zoom-in-95">
              <div className="p-5 border-b border-rose-100 bg-rose-50 flex justify-between items-center rounded-t-2xl">
                <h3 className="font-bold text-rose-900">Revert Transaction</h3>
