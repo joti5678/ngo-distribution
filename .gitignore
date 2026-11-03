@@ -2,6 +2,7 @@
 
 # dependencies
 /node_modules
+/donor-automation-bot/node_modules/
 /.pnp
 .pnp.*
 .yarn/*
