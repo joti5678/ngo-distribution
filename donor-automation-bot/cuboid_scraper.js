@@ -1,101 +1,91 @@
+require('dotenv').config();
 const { chromium } = require('playwright');
+const { createClient } = require('@supabase/supabase-js');
 
-async function scrapeCUBOID() {
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
+
+async function runAutomation() {
     console.log("🚀 Starting CUBOID Automation Bot...");
-    const browser = await chromium.launch({ headless: false }); // Set to true in production
-    const context = await browser.newContext();
-    const page = await context.newPage();
 
     try {
-        console.log("🌐 Navigating to login page...");
-        await page.goto('https://iwms.nanoit.biz/login', { waitUntil: 'networkidle' }); // Adjust login URL if different
+        // ১. ডাটাবেস থেকে সেটিংস আনা
+        const { data: settings, error: settingErr } = await supabase.from('automation_settings').select('*').single();
+        if (settingErr || !settings) throw new Error("Settings not found.");
+        if (!settings.is_active) {
+            console.log("⚠️ Automation is disabled in settings.");
+            return;
+        }
 
-        // --- 1. Login ---
-        console.log("🔑 Logging in...");
-        // You will need to replace these selectors with the actual ones from the login page
-        await page.fill('input[name="email"]', 'your_email@acted.org'); // Example selector
-        await page.fill('input[name="password"]', 'your_password');     // Example selector
-        await page.click('button[type="submit"]');                      // Example selector
+        const browser = await chromium.launch({ headless: false }); // টেস্ট করার জন্য false, গিটহাবে তোলার আগে true করে দেবেন
+        const context = await browser.newContext();
+        const page = await context.newPage();
+
+        // ২. লগইন করা
+        console.log("🌐 Navigating to login page...");
+        await page.goto(settings.donor_url, { waitUntil: 'networkidle' });
+        
+        await page.fill('input[name="email"], #email', settings.donor_username); 
+        await page.fill('input[name="password"], #password', settings.donor_password);
+        await page.click('button[type="submit"]');
 
         await page.waitForNavigation({ waitUntil: 'networkidle' });
         console.log("✅ Login Successful!");
 
-        // --- 2. Navigate to Stock Report ---
-        console.log("📂 Navigating to Stock Report page...");
+        // ৩. স্টক পেজে যাওয়া
         await page.goto('https://iwms.nanoit.biz/current-total-goods-stock-report', { waitUntil: 'networkidle' });
 
-        // --- 3. Filter Selection ---
-        console.log("🔍 Setting filters...");
-
-        // Select 'Sector Wise Stock' radio button (if not already selected)
-        // await page.click('input[value="sector_wise"]'); // Adjust selector if needed
-
-        // Select Sector 'NFI'
-        await page.selectOption('select[name="sector_id"]', { label: 'NFI' }); // Adjust selector based on actual HTML
+        // ৪. ফিল্টার সিলেক্ট করা (ACTED, NFI ইত্যাদি)
+        await page.selectOption('select[name="sector_id"]', { label: 'NFI' });
         await page.waitForLoadState('networkidle');
-
-        // Select Partner Agency 'ACTED'
-        await page.selectOption('select[name="partner_id"]', { label: 'ACTED' }); // Adjust selector based on actual HTML
+        await page.selectOption('select[name="partner_id"]', { label: 'ACTED' });
         await page.waitForLoadState('networkidle');
-
-        // Select Warehouse (Iterate through warehouses later, picking one for now)
-        const warehouseToSelect = 'Acted WH _ RC, Kutupalong';
-        await page.selectOption('select[name="warehouse_id"]', { label: warehouseToSelect }); // Adjust selector based on actual HTML
-
-        // Click Search
+        
+        // নির্দিষ্ট ওয়্যারহাউজ সিলেক্ট (আপাতত একটি ডেমো ওয়্যারহাউজ দেওয়া হলো)
+        const targetWhName = 'Acted WH _ RC, Kutupalong'; 
+        const targetWhCode = 'RC-KTP'; // আপনার সিস্টেমের ওয়্যারহাউজ কোড
+        
+        await page.selectOption('select[name="warehouse_id"]', { label: targetWhName });
         await page.click('button:has-text("Search")');
         await page.waitForLoadState('networkidle');
-        console.log("✅ Filters applied.");
 
-        // --- 4. Extract Data ---
-        console.log("📥 Extracting data from table...");
-
-        // Wait for the table to appear
-        await page.waitForSelector('table.table'); // Adjust selector based on actual table class/id
-
-        // Increase entries shown to max if pagination exists (Optional but recommended)
-        // await page.selectOption('select[name="DataTables_Table_0_length"]', '-1'); 
-
-        const extractedData = await page.evaluate(() => {
+        // ৫. ডাটা এক্সট্র্যাক্ট করা
+        const extractedData = await page.evaluate((whCode) => {
             const data = [];
-            // Select all rows inside the table body
             const rows = document.querySelectorAll('table.table tbody tr'); 
-
             rows.forEach(row => {
-                const columns = row.querySelectorAll('td');
-                if (columns.length >= 6) { // Ensure it's a data row
-                    const goodsCode = columns[1].innerText.trim();
-                    const goodsInformation = columns[2].innerText.trim();
-                    const unit = columns[3].innerText.trim();
-                    const availableRegularGoods = parseFloat(columns[4].innerText.replace(/,/g, '')) || 0;
-                    // Contingency goods are in column 5, but usually we just want regular or total. 
-                    // Adjust logic if you need to sum them.
-
-                    if (goodsCode) {
-                        data.push({
-                            product_code: goodsCode,
-                            product_name: goodsInformation,
-                            quantity: availableRegularGoods // Using regular goods for now
-                        });
+                const cols = row.querySelectorAll('td');
+                if (cols.length >= 6) {
+                    const pCode = cols[1].innerText.trim();
+                    const pName = cols[2].innerText.trim();
+                    const qty = parseFloat(cols[4].innerText.replace(/,/g, '')) || 0;
+                    if (pCode) {
+                        data.push({ warehouse_code: whCode, product_code: pCode, product_name: pName, quantity: qty });
                     }
                 }
             });
             return data;
-        });
+        }, targetWhCode);
 
-        console.log(`📦 Successfully extracted ${extractedData.length} items.`);
-        console.log(extractedData.slice(0, 3)); // Print first 3 for verification
+        console.log(`📦 Extracted ${extractedData.length} items.`);
+        await browser.close();
 
-        // In a real scenario, you would map 'warehouseToSelect' to your internal 'warehouse_code'
-        // and push 'extractedData' to Supabase.
+        // ৬. ডাটাবেসে সেভ করা
+        if (extractedData.length > 0) {
+            let stockDate = new Date();
+            if (settings.is_previous_day_stock) stockDate.setDate(stockDate.getDate() - 1);
+            const formattedDate = stockDate.toISOString().split('T')[0];
+
+            await supabase.from('donor_warehouse_stock').delete().eq('stock_date', formattedDate).eq('warehouse_code', targetWhCode);
+
+            const dbPayload = extractedData.map(item => ({ ...item, stock_date: formattedDate }));
+            await supabase.from('donor_warehouse_stock').insert(dbPayload);
+
+            console.log("✅ Data successfully saved to Supabase!");
+        }
 
     } catch (error) {
-        console.error("❌ Automation Failed:", error);
-    } finally {
-        await browser.close();
-        console.log("🛑 Browser closed.");
+        console.error("❌ Automation Failed:", error.message);
     }
 }
 
-// scrapeCUBOID(); // Uncomment to run locally if dependencies were installed
-print("Playwright script structure created based on screenshots.")
+runAutomation();
