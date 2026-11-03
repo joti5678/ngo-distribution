@@ -3,7 +3,7 @@ name: Daily CUBOID Stock Sync
 on:
   schedule:
     # এটি প্রতিদিন বাংলাদেশ সময় রাত ১২:১৫ তে রান করবে (UTC 18:15)
-    - cron: '13 11 * * *'
+    - cron: '15 11 * * *'
   workflow_dispatch: # গিটহাব ওয়েবসাইট থেকে ম্যানুয়ালি রান করার অপশন
 
 
