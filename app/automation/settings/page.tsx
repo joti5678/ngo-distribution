@@ -9,6 +9,10 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
 );
 
+// 👇 এখানে আপনার Google Cloud সার্ভারের External IP টি দিন 👇
+// উদাহরণ: const BOT_SERVER_URL = 'http://34.123.45.67:4000';
+const BOT_SERVER_URL = 'http://136.87.183.229:4000'; 
+
 const DONOR_WAREHOUSES = [
     { code: "117", name: "Acted WH _ RC, Kutupalong" },
     { code: "118", name: "Acted WH _ Camp 1E, Kutupalong" },
@@ -142,10 +146,10 @@ export default function AutomationSettingsPage() {
     if (!testWhCode) return showMessage("Please select a Donor Warehouse to test.", "error");
     setIsTesting(true);
     setTestData(null);
-    showMessage(`Initializing Test for WH [${testWhCode}]...`, "success");
+    showMessage(`Initializing Test for WH [${testWhCode}] via ${BOT_SERVER_URL}...`, "success");
 
     try {
-      const response = await fetch(`http://localhost:4000/api/test-scrape?wh_code=${testWhCode}`);
+      const response = await fetch(`${BOT_SERVER_URL}/api/test-scrape?wh_code=${testWhCode}`);
       const result = await response.json();
       if (result.success) {
          setTestData(result.data);
@@ -153,7 +157,7 @@ export default function AutomationSettingsPage() {
          setTimeout(() => window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }), 500);
       } else throw new Error(result.error);
     } catch (error: any) {
-      showMessage(`Test Failed: Is the local bot running? Check terminal.`, "error");
+      showMessage(`Test Failed: Connection refused. Please ensure your Cloud Server is running and port 4000 is open in firewall.`, "error");
     } finally {
       setIsTesting(false);
     }
@@ -165,7 +169,7 @@ export default function AutomationSettingsPage() {
     showMessage(`Fetching and saving data for ALL mapped warehouses... Please wait.`, "success");
 
     try {
-      const response = await fetch(`http://localhost:4000/api/manual-scrape`, {
+      const response = await fetch(`${BOT_SERVER_URL}/api/manual-scrape`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ date: manualDate })
@@ -175,7 +179,7 @@ export default function AutomationSettingsPage() {
          showMessage(`✅ Success! Fetched and SAVED ${result.count} items for date: ${manualDate}`, "success");
       } else throw new Error(result.error);
     } catch (error: any) {
-      showMessage(`Fetch & Save Failed: ${error.message}`, "error");
+      showMessage(`Fetch & Save Failed: Could not connect to Bot Server.`, "error");
     } finally {
       setIsManualFetching(false);
     }
