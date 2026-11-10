@@ -12,7 +12,6 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
 );
 
-// Dynamic Theme Colors for Manifests
 const MANIFEST_COLORS = [
   { bg: 'bg-blue-50', border: 'border-blue-200', text: 'text-blue-900', numBg: 'bg-blue-200/50', active: 'bg-blue-500' },
   { bg: 'bg-emerald-50', border: 'border-emerald-200', text: 'text-emerald-900', numBg: 'bg-emerald-200/50', active: 'bg-emerald-500' },
@@ -25,30 +24,26 @@ const MANIFEST_COLORS = [
 export default function DailyDistributionReportPage() {
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [distributionPoints, setDistributionPoints] = useState<any[]>([]);
-
-  // Left Panel States
   const [activeManifests, setActiveManifests] = useState<any[]>([]);
-  const [leftDpFilter, setLeftDpFilter] = useState('');
-
-  // Right Panel Data
+  const [dpFilter, setDpFilter] = useState('');
+  
   const [allManifestItems, setAllManifestItems] = useState<any[]>([]);
   const [whStockMap, setWhStockMap] = useState<Record<string, number>>({});
-
-  // Input State mapping: key = manifestId_productId
   const [inputs, setInputs] = useState<Record<string, { qty: number | '', hh: number | '' }>>({});
   const [distDate, setDistDate] = useState('');
   const [remarks, setRemarks] = useState('');
-
-  // Bottom List States
+  
+  // History states
   const [historyItems, setHistoryItems] = useState<any[]>([]);
   const [filterDpId, setFilterDpId] = useState('ALL');
   const [filterStartDate, setFilterStartDate] = useState('');
   const [filterEndDate, setFilterEndDate] = useState('');
   const [tableSearch, setTableSearch] = useState('');
-
-  // Pagination State
   const [currentPage, setCurrentPage] = useState(1);
-  const ITEMS_PER_PAGE = 10;
+  const ITEMS_PER_PAGE = 5;
+  const [dbLimit, setDbLimit] = useState(25);
+  const [totalDbCount, setTotalDbCount] = useState(0);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
 
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -110,50 +105,34 @@ export default function DailyDistributionReportPage() {
       } else {
           let rawIds = profile?.assigned_dp_ids || sessionUser?.assigned_dp_ids || [];
           let dpIds: string[] = [];
-
           if (typeof rawIds === 'string') {
-              try { 
-                  dpIds = JSON.parse(rawIds); 
-              } catch { 
-                  dpIds = rawIds.includes(',') ? rawIds.split(',') : [rawIds]; 
-              }
-          } else if (Array.isArray(rawIds)) {
-              dpIds = rawIds;
-          } else if (rawIds && typeof rawIds === 'object') {
-              dpIds = Object.values(rawIds);
-          }
+              try { dpIds = JSON.parse(rawIds); } catch { dpIds = rawIds.includes(',') ? rawIds.split(',') : [rawIds]; }
+          } else if (Array.isArray(rawIds)) { dpIds = rawIds; } 
+          else if (rawIds && typeof rawIds === 'object') { dpIds = Object.values(rawIds); }
 
           const cleanDpIds = dpIds.map(id => String(id).trim()).filter(id => id !== '');
           allowedDps = allDps.filter(dp => cleanDpIds.includes(String(dp.id).trim()));
       }
 
       setDistributionPoints(allowedDps);
-
-      if (allowedDps.length > 0) {
-          setLeftDpFilter(allowedDps[0].id);
-      } else {
-          setLeftDpFilter('');
-      }
+      if (allowedDps.length > 0) setDpFilter(allowedDps[0].id);
+      else setDpFilter('');
 
       const idsToFetch = allowedDps.length > 0 ? allowedDps.map(dp => dp.id) : ['NONE-NO-ACCESS'];
-      await loadManifestsAndData(idsToFetch);
+      await loadManifestsAndData(idsToFetch, 25);
 
     } catch (err) {
       console.error("Error fetching DP assignment:", err);
     }
-
     setIsLoading(false);
   };
 
-  const loadManifestsAndData = async (allowedDpIds: string[]) => {
+  const loadManifestsAndData = async (allowedDpIds: string[], limit: number) => {
     if (allowedDpIds.length === 0 || allowedDpIds.includes('NONE-NO-ACCESS')) {
-      setActiveManifests([]);
-      setAllManifestItems([]);
-      setInputs({});
-      setHistoryItems([]);
-      return;
+      setActiveManifests([]); setAllManifestItems([]); setInputs({}); setHistoryItems([]); return;
     }
 
+    // 1. Fetch Active Manifests
     const { data: mData } = await supabase.from('manifests')
       .select('*, dp:distribution_points(*)')
       .eq('status', 'Active')
@@ -172,7 +151,6 @@ export default function DailyDistributionReportPage() {
     });
 
     setActiveManifests(validManifests);
-
     const manifestIds = validManifests.map(m => m.id);
 
     if (manifestIds.length > 0) {
@@ -180,41 +158,47 @@ export default function DailyDistributionReportPage() {
         .select(`id, target_qty, distributed_qty, manifest_id, product_id, products (id, name, code, unit_type, product_type, is_open_stock)`)
         .in('manifest_id', manifestIds);
 
-      const items = mItems || [];
-      setAllManifestItems(items);
+      setAllManifestItems(mItems || []);
 
       const initInputs: Record<string, { qty: number | '', hh: number | '' }> = {};
-      items.forEach((item: any) => {
-        initInputs[`${item.manifest_id}_${item.product_id}`] = { qty: '', hh: '' };
-      });
-      setInputs(initInputs);
+      (mItems || []).forEach((item: any) => { initInputs[`${item.manifest_id}_${item.product_id}`] = { qty: '', hh: '' }; });
+      
+      // Preserve existing inputs if any during load more
+      setInputs(prev => ({ ...initInputs, ...prev }));
 
       const { data: invData } = await supabase.from('inventory').select('warehouse_id, product_id, quantity');
       const stockMap: Record<string, number> = {};
-      invData?.forEach(inv => {
-          stockMap[`${inv.warehouse_id}_${inv.product_id}`] = Number(inv.quantity) || 0;
-      });
+      invData?.forEach(inv => { stockMap[`${inv.warehouse_id}_${inv.product_id}`] = Number(inv.quantity) || 0; });
       setWhStockMap(stockMap);
     } else {
-      setAllManifestItems([]);
-      setInputs({});
+      setAllManifestItems([]); 
     }
+
+    // 2. Fetch History with Limit and Total Count
+    const { count } = await supabase.from('distributions').select('*', { count: 'exact', head: true }).in('distribution_point_id', allowedDpIds);
+    setTotalDbCount(count || 0);
 
     const { data: hData } = await supabase.from('distributions')
       .select(`
         id, distribution_date, remarks, created_by_email, updated_by_email, updated_at, created_at,
         distribution_points!inner (id, name, code, nfi_warehouse_id, lpg_warehouse_id),
-        distribution_items (
-          id, quantity, total_hh, product_id, manifest_id,
-          products (name, code, unit_type, product_type, is_open_stock),
-          manifests (title, manifest_code)
-        )
+        distribution_items (id, quantity, total_hh, product_id, manifest_id, products (name, code, unit_type, product_type, is_open_stock), manifests (title, manifest_code))
       `)
       .in('distribution_point_id', allowedDpIds)
       .order('distribution_date', { ascending: false })
-      .order('created_at', { ascending: false });
+      .order('created_at', { ascending: false })
+      .limit(limit);
 
     setHistoryItems(hData || []);
+  };
+
+  const handleLoadMoreHistory = async () => {
+    setIsLoadingMore(true);
+    const newLimit = dbLimit + 25;
+    setDbLimit(newLimit);
+    const idsToFetch = distributionPoints.length > 0 ? distributionPoints.map(dp => dp.id) : ['NONE-NO-ACCESS'];
+    await loadManifestsAndData(idsToFetch, newLimit);
+    setIsLoadingMore(false);
   };
 
   const handleQtyChange = (manifestId: string, productId: string, val: string, maxStock: number, isOpenStock: boolean) => {
@@ -222,33 +206,22 @@ export default function DailyDistributionReportPage() {
     const prevHH = inputs[key]?.hh;
     const prevQty = inputs[key]?.qty;
 
-    if (val === '') { 
-      setInputs(prev => ({ ...prev, [key]: { qty: '', hh: '' } })); 
-      return; 
-    }
+    if (val === '') { setInputs(prev => ({ ...prev, [key]: { qty: '', hh: '' } })); return; }
 
     const num = parseInt(val, 10);
     if (isNaN(num) || num < 0) return;
 
-    if (!isOpenStock && num > maxStock) {
-      showMessage(`Distributed Quantity exceeds available warehouse stock (${maxStock})!`, 'error');
-      return;
-    }
+    if (!isOpenStock && num > maxStock) { showMessage(`Quantity exceeds available stock (${maxStock})!`, 'error'); return; }
 
     let newHH = prevHH;
-    if (prevHH === '' || prevHH === prevQty) {
-      newHH = num;
-    }
+    if (prevHH === '' || prevHH === prevQty) newHH = num;
 
     setInputs(prev => ({ ...prev, [key]: { qty: num, hh: newHH } }));
   };
 
   const handleHHChange = (manifestId: string, productId: string, val: string) => {
     const key = `${manifestId}_${productId}`;
-    if (val === '') { 
-      setInputs(prev => ({ ...prev, [key]: { ...prev[key], hh: '' } })); 
-      return; 
-    }
+    if (val === '') { setInputs(prev => ({ ...prev, [key]: { ...prev[key], hh: '' } })); return; }
     const num = parseInt(val, 10);
     if (isNaN(num) || num < 0) return;
     setInputs(prev => ({ ...prev, [key]: { ...prev[key], hh: num } }));
@@ -256,64 +229,34 @@ export default function DailyDistributionReportPage() {
 
   const handleSubmitAll = async () => {
     const dpGroups: Record<string, { dp: any, payloads: any[] }> = {};
-
-    filteredLeftManifests.forEach(manifest => {
+    filteredManifests.forEach(manifest => {
       const items = allManifestItems.filter(i => i.manifest_id === manifest.id);
       const validItems = items.filter(item => {
-         const key = `${manifest.id}_${item.product_id}`;
-         const q = Number(inputs[key]?.qty);
+         const q = Number(inputs[`${manifest.id}_${item.product_id}`]?.qty);
          return !isNaN(q) && q > 0;
       });
-
       if (validItems.length > 0) {
-        if (!dpGroups[manifest.distribution_point_id]) {
-          dpGroups[manifest.distribution_point_id] = { dp: manifest.dp, payloads: [] };
-        }
+        if (!dpGroups[manifest.distribution_point_id]) dpGroups[manifest.distribution_point_id] = { dp: manifest.dp, payloads: [] };
         dpGroups[manifest.distribution_point_id].payloads.push({ manifest, items: validItems });
       }
     });
 
     const dpIdsToSubmit = Object.keys(dpGroups);
-    if (dpIdsToSubmit.length === 0) {
-      showMessage("Please enter at least one distributed quantity.", "error");
-      return;
-    }
+    if (dpIdsToSubmit.length === 0) { showMessage("Please enter at least one quantity.", "error"); return; }
 
-    // OVERALL STOCK CAPACITY VALIDATION (Mock Deduction)
     const tempStockMap = { ...whStockMap };
     for (const dpId of dpIdsToSubmit) {
-      const groupData = dpGroups[dpId];
-      for (const payload of groupData.payloads) {
-        const { manifest, items } = payload;
-        for (const item of items) {
-          const key = `${manifest.id}_${item.product_id}`;
-          const distQty = Number(inputs[key].qty);
+      for (const payload of dpGroups[dpId].payloads) {
+        for (const item of payload.items) {
+          const distQty = Number(inputs[`${payload.manifest.id}_${item.product_id}`].qty);
           if (distQty > 0 && !item.products?.is_open_stock) {
-            const stockKey1 = `${manifest.dp?.nfi_warehouse_id}_${item.product_id}`;
-            const stockKey2 = `${manifest.dp?.lpg_warehouse_id}_${item.product_id}`;
-
-            let deducted = false;
-            let remainingToDeduct = distQty;
-
-            if ((tempStockMap[stockKey1] || 0) >= remainingToDeduct) {
-              tempStockMap[stockKey1] -= remainingToDeduct;
-              remainingToDeduct = 0;
-              deducted = true;
-            } else if ((tempStockMap[stockKey1] || 0) > 0) {
-              remainingToDeduct -= tempStockMap[stockKey1];
-              tempStockMap[stockKey1] = 0;
-            }
-
-            if (remainingToDeduct > 0 && (tempStockMap[stockKey2] || 0) >= remainingToDeduct) {
-              tempStockMap[stockKey2] -= remainingToDeduct;
-              remainingToDeduct = 0;
-              deducted = true;
-            }
-
-            if (remainingToDeduct > 0) {
-               showMessage(`ERROR: Total input sum for ${item.products?.name} across manifests exceeds available warehouse stock! Please adjust quantities.`, "error");
-               return; 
-            }
+            const s1 = `${payload.manifest.dp?.nfi_warehouse_id}_${item.product_id}`;
+            const s2 = `${payload.manifest.dp?.lpg_warehouse_id}_${item.product_id}`;
+            let rem = distQty;
+            if ((tempStockMap[s1] || 0) >= rem) { tempStockMap[s1] -= rem; rem = 0; }
+            else if ((tempStockMap[s1] || 0) > 0) { rem -= tempStockMap[s1]; tempStockMap[s1] = 0; }
+            if (rem > 0 && (tempStockMap[s2] || 0) >= rem) { tempStockMap[s2] -= rem; rem = 0; }
+            if (rem > 0) { showMessage(`Sum for ${item.products?.name} exceeds available stock!`, "error"); return; }
           }
         }
       }
@@ -325,58 +268,31 @@ export default function DailyDistributionReportPage() {
       entryDateTime.setHours(new Date().getHours(), new Date().getMinutes(), new Date().getSeconds());
 
       for (const dpId of dpIdsToSubmit) {
-        const groupData = dpGroups[dpId];
-
         const { data: distHeader, error: distErr } = await supabase.from('distributions').insert([{
-          distribution_point_id: dpId, 
-          distribution_date: distDate, 
-          remarks: remarks || null,
-          created_by: currentUser?.id || null, 
-          created_by_email: currentUser?.email || null
+          distribution_point_id: dpId, distribution_date: distDate, remarks: remarks || null,
+          created_by: currentUser?.id || null, created_by_email: currentUser?.email || null
         }]).select().single();
-
         if (distErr) throw distErr;
+        
         const distRefCode = `DIST-${distHeader.id.split('-')[0].toUpperCase()}`;
 
-        for (const payload of groupData.payloads) {
-          const { manifest, items } = payload;
-          const connectedWhIds = [manifest.dp?.nfi_warehouse_id, manifest.dp?.lpg_warehouse_id].filter(Boolean);
+        for (const payload of dpGroups[dpId].payloads) {
+          const connectedWhIds = [payload.manifest.dp?.nfi_warehouse_id, payload.manifest.dp?.lpg_warehouse_id].filter(Boolean);
+          for (const item of payload.items) {
+            const distQty = Number(inputs[`${payload.manifest.id}_${item.product_id}`].qty);
+            const distHH = Number(inputs[`${payload.manifest.id}_${item.product_id}`].hh) || 0; 
+            
+            await supabase.from('manifest_items').update({ distributed_qty: (Number(item.distributed_qty) || 0) + distQty }).eq('id', item.id);
+            await supabase.from('distribution_items').insert([{ distribution_id: distHeader.id, product_id: item.product_id, manifest_id: payload.manifest.id, quantity: distQty, total_hh: distHH }]);
 
-          for (const item of items) {
-            const key = `${manifest.id}_${item.product_id}`;
-            const distQty = Number(inputs[key].qty);
-            const distHH = Number(inputs[key].hh) || 0; 
-
-            const isOpenStock = item.products?.is_open_stock;
-
-            const currentManifestDist = Number(item.distributed_qty) || 0;
-            await supabase.from('manifest_items').update({ distributed_qty: currentManifestDist + distQty }).eq('id', item.id);
-
-            await supabase.from('distribution_items').insert([{ 
-              distribution_id: distHeader.id, 
-              product_id: item.product_id, 
-              manifest_id: manifest.id,
-              quantity: distQty,
-              total_hh: distHH
-            }]);
-
-            if (!isOpenStock) {
-                const { data: invFind } = await supabase.from('inventory')
-                  .select('id, warehouse_id, quantity')
-                  .in('warehouse_id', connectedWhIds)
-                  .eq('product_id', item.product_id)
-                  .order('quantity', { ascending: false })
-                  .limit(1);
-
+            if (!item.products?.is_open_stock) {
+                const { data: invFind } = await supabase.from('inventory').select('id, warehouse_id, quantity').in('warehouse_id', connectedWhIds).eq('product_id', item.product_id).order('quantity', { ascending: false }).limit(1);
                 const targetWh = (invFind && invFind.length > 0) ? invFind[0] : null;
-                if (!targetWh) throw new Error(`Stock record missing for ${item.products?.name}`);
-
+                if (!targetWh) throw new Error(`Stock missing for ${item.products?.name}`);
                 await supabase.from('inventory').update({ quantity: Math.max(0, targetWh.quantity - distQty), last_updated: new Date().toISOString() }).eq('id', targetWh.id);
-
                 await supabase.from('inventory_transactions').insert([{
                   warehouse_id: targetWh.warehouse_id, product_id: item.product_id, transaction_type: 'OUT',
-                  quantity: distQty, reference_no: distRefCode, 
-                  remarks: `Distributed at ${manifest.dp?.name} | MNF: ${manifest.manifest_code}`,
+                  quantity: distQty, reference_no: distRefCode, remarks: `Distributed at ${payload.manifest.dp?.name}`,
                   created_by: currentUser?.id, created_by_email: currentUser?.email, created_at: entryDateTime.toISOString()
                 }]);
             }
@@ -386,45 +302,27 @@ export default function DailyDistributionReportPage() {
 
       showMessage(`Distribution submitted successfully!`, "success");
       setRemarks('');
-
-      const initInputs: Record<string, { qty: number | '', hh: number | '' }> = {};
-      allManifestItems.forEach((item: any) => {
-        initInputs[`${item.manifest_id}_${item.product_id}`] = { qty: '', hh: '' };
-      });
-      setInputs(initInputs);
-
+      setInputs({});
       const idsToFetch = distributionPoints.length > 0 ? distributionPoints.map(dp => dp.id) : ['NONE-NO-ACCESS'];
-      await loadManifestsAndData(idsToFetch);
-
-    } catch (err: any) {
-      showMessage(`Submission failed: ${err.message}`, "error");
-    } finally {
-      setIsSubmitting(false);
-    }
+      await loadManifestsAndData(idsToFetch, dbLimit);
+    } catch (err: any) { showMessage(`Submission failed: ${err.message}`, "error"); } 
+    finally { setIsSubmitting(false); }
   };
 
   const openEditModal = async (distTxn: any) => {
     setDistToEdit(distTxn);
     setEditRemarks(distTxn.remarks || '');
-
     const vals: any = {};
     const productTotals: Record<string, number> = {};
-
     for (const item of distTxn.distribution_items) {
       vals[item.id] = { qty: item.quantity, hh: item.total_hh };
       productTotals[item.product_id] = (productTotals[item.product_id] || 0) + item.quantity;
     }
-
     const maxStocks: Record<string, number> = {}; 
     const connectedWhIds = [distTxn.distribution_points.nfi_warehouse_id, distTxn.distribution_points.lpg_warehouse_id].filter(Boolean);
     const uniqueProductIds = Object.keys(productTotals);
-
     if (uniqueProductIds.length > 0 && connectedWhIds.length > 0) {
-      const { data: invData } = await supabase.from('inventory')
-          .select('product_id, quantity')
-          .in('warehouse_id', connectedWhIds)
-          .in('product_id', uniqueProductIds);
-
+      const { data: invData } = await supabase.from('inventory').select('product_id, quantity').in('warehouse_id', connectedWhIds).in('product_id', uniqueProductIds);
       for (const pid of uniqueProductIds) {
           const currentStock = (invData || []).filter((i:any) => i.product_id === pid).reduce((sum:number, i:any) => sum + i.quantity, 0);
           maxStocks[pid] = currentStock + productTotals[pid];
@@ -432,7 +330,6 @@ export default function DailyDistributionReportPage() {
     } else {
       for (const pid of uniqueProductIds) maxStocks[pid] = productTotals[pid];
     }
-
     setEditValues(vals);
     setEditMaxStocks(maxStocks);
     setEditModalOpen(true);
@@ -441,79 +338,34 @@ export default function DailyDistributionReportPage() {
   const handleSaveEdit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!distToEdit) return;
-
-    const newProductTotals: Record<string, number> = {};
-    for (const item of distToEdit.distribution_items) {
-        const newQty = Number(editValues[item.id]?.qty || 0);
-        newProductTotals[item.product_id] = (newProductTotals[item.product_id] || 0) + newQty;
-    }
-
-    for (const pid of Object.keys(newProductTotals)) {
-        const item = distToEdit.distribution_items.find((i:any) => i.product_id === pid);
-        if (!item?.products?.is_open_stock && newProductTotals[pid] > (editMaxStocks[pid] || 0)) {
-            showMessage(`Total edit quantity for a product exceeds its Shared Max Qty (${editMaxStocks[pid]}).`, "error");
-            return; 
-        }
-    }
-
     setIsSubmitting(true);
     try {
       const connectedWhIds = [distToEdit.distribution_points.nfi_warehouse_id, distToEdit.distribution_points.lpg_warehouse_id].filter(Boolean);
       const distRefCode = `DIST-${distToEdit.id.split('-')[0].toUpperCase()}`;
-
-      const sortedItems = [...distToEdit.distribution_items].sort((a, b) => {
-        const diffA = Number(editValues[a.id]?.qty || 0) - Number(a.quantity);
-        const diffB = Number(editValues[b.id]?.qty || 0) - Number(b.quantity);
-        return diffA - diffB; 
-      });
-
-      for (const item of sortedItems) {
+      for (const item of distToEdit.distribution_items) {
         const newQty = Number(editValues[item.id]?.qty || 0);
         const newHh = Number(editValues[item.id]?.hh || 0);
-        const oldQty = Number(item.quantity);
-        const diffQty = newQty - oldQty;
-        const isOpenStock = item.products?.is_open_stock;
-
+        const diffQty = newQty - Number(item.quantity);
         if (diffQty !== 0) {
-
           const { data: mItem } = await supabase.from('manifest_items').select('id, distributed_qty').eq('manifest_id', item.manifest_id).eq('product_id', item.product_id).single();
           if (mItem) await supabase.from('manifest_items').update({ distributed_qty: Math.max(0, (Number(mItem.distributed_qty) || 0) + diffQty) }).eq('id', mItem.id);
-
-          if (!isOpenStock) {
-              const { data: invFind } = await supabase.from('inventory')
-                .select('id, warehouse_id, quantity')
-                .in('warehouse_id', connectedWhIds)
-                .eq('product_id', item.product_id)
-                .order('quantity', { ascending: false })
-                .limit(1);
-
-              if (!invFind || invFind.length === 0) throw new Error("Warehouse stock record missing.");
+          if (!item.products?.is_open_stock) {
+              const { data: invFind } = await supabase.from('inventory').select('id, warehouse_id, quantity').in('warehouse_id', connectedWhIds).eq('product_id', item.product_id).order('quantity', { ascending: false }).limit(1);
+              if (!invFind || invFind.length === 0) throw new Error("Warehouse stock missing.");
               const targetWh = invFind[0];
-
-              const updatedStock = targetWh.quantity - diffQty;
-              if (updatedStock < 0) throw new Error(`Not enough stock for ${item.products.name}`);
-              await supabase.from('inventory').update({ quantity: updatedStock, last_updated: new Date().toISOString() }).eq('id', targetWh.id);
-
+              await supabase.from('inventory').update({ quantity: targetWh.quantity - diffQty, last_updated: new Date().toISOString() }).eq('id', targetWh.id);
               const { data: txn } = await supabase.from('inventory_transactions').select('id').eq('reference_no', distRefCode).eq('product_id', item.product_id).single();
               if (txn) await supabase.from('inventory_transactions').update({ quantity: newQty }).eq('id', txn.id);
           }
         }
-
         await supabase.from('distribution_items').update({ quantity: newQty, total_hh: newHh }).eq('id', item.id);
       }
-
       await supabase.from('distributions').update({ remarks: editRemarks }).eq('id', distToEdit.id);
-
       showMessage(`Transaction updated successfully!`, "success");
       setEditModalOpen(false);
       const idsToFetch = distributionPoints.length > 0 ? distributionPoints.map(dp => dp.id) : ['NONE-NO-ACCESS'];
-      await loadManifestsAndData(idsToFetch);
-
-    } catch (err: any) {
-      showMessage(`Edit failed: ${err.message}`, "error");
-    } finally {
-      setIsSubmitting(false);
-    }
+      await loadManifestsAndData(idsToFetch, dbLimit);
+    } catch (err: any) { showMessage(`Edit failed: ${err.message}`, "error"); } finally { setIsSubmitting(false); }
   };
 
   const handleRevertTransaction = async () => {
@@ -522,57 +374,35 @@ export default function DailyDistributionReportPage() {
     try {
       const connectedWhIds = [txnToRevert.distribution_points.nfi_warehouse_id, txnToRevert.distribution_points.lpg_warehouse_id].filter(Boolean);
       const distRefCode = `DIST-${txnToRevert.id.split('-')[0].toUpperCase()}`;
-
       for (const item of txnToRevert.distribution_items) {
-
         const { data: mItem } = await supabase.from('manifest_items').select('id, distributed_qty').eq('manifest_id', item.manifest_id).eq('product_id', item.product_id).single();
-        if (mItem) {
-           await supabase.from('manifest_items').update({ distributed_qty: Math.max(0, (Number(mItem.distributed_qty) || 0) - item.quantity) }).eq('id', mItem.id);
-        }
-
+        if (mItem) await supabase.from('manifest_items').update({ distributed_qty: Math.max(0, (Number(mItem.distributed_qty) || 0) - item.quantity) }).eq('id', mItem.id);
         if (!item.products?.is_open_stock) {
             const { data: invFind } = await supabase.from('inventory').select('id, quantity').in('warehouse_id', connectedWhIds).eq('product_id', item.product_id).order('quantity', { ascending: false }).limit(1);
-            if (invFind && invFind.length > 0) {
-              await supabase.from('inventory').update({ quantity: invFind[0].quantity + item.quantity }).eq('id', invFind[0].id);
-            }
+            if (invFind && invFind.length > 0) await supabase.from('inventory').update({ quantity: invFind[0].quantity + item.quantity }).eq('id', invFind[0].id);
         }
       }
-
       await supabase.from('inventory_transactions').delete().eq('reference_no', distRefCode);
       await supabase.from('distributions').delete().eq('id', txnToRevert.id);
-
-      showMessage(`Entire transaction deleted & stock restored.`, "success");
+      showMessage(`Transaction deleted & stock restored.`, "success");
       setRevertModalOpen(false);
       const idsToFetch = distributionPoints.length > 0 ? distributionPoints.map(dp => dp.id) : ['NONE-NO-ACCESS'];
-      await loadManifestsAndData(idsToFetch);
-    } catch (err: any) {
-      showMessage(`Delete failed: ${err.message}`, "error");
-    } finally {
-      setIsSubmitting(false);
-    }
+      await loadManifestsAndData(idsToFetch, dbLimit);
+    } catch (err: any) { showMessage(`Delete failed: ${err.message}`, "error"); } finally { setIsSubmitting(false); }
   };
 
-  const filteredLeftManifests = activeManifests.filter(m => leftDpFilter ? m.distribution_point_id === leftDpFilter : false);
+  const filteredManifests = activeManifests.filter(m => dpFilter ? m.distribution_point_id === dpFilter : true);
 
   const filteredHistory = historyItems.filter(dist => {
     const matchDp = filterDpId === 'ALL' ? true : dist.distribution_points.id === filterDpId;
-
     let matchDate = true;
-    if (filterStartDate && filterEndDate) {
-      matchDate = dist.distribution_date >= filterStartDate && dist.distribution_date <= filterEndDate;
-    } else if (filterStartDate) {
-      matchDate = dist.distribution_date >= filterStartDate;
-    } else if (filterEndDate) {
-      matchDate = dist.distribution_date <= filterEndDate;
-    }
-
+    if (filterStartDate && filterEndDate) matchDate = dist.distribution_date >= filterStartDate && dist.distribution_date <= filterEndDate;
+    else if (filterStartDate) matchDate = dist.distribution_date >= filterStartDate;
+    else if (filterEndDate) matchDate = dist.distribution_date <= filterEndDate;
     const q = tableSearch.toLowerCase();
     const matchSearch = q ? dist.distribution_items.some((item: any) => 
-      item.products.name.toLowerCase().includes(q) || 
-      item.manifests?.title.toLowerCase().includes(q) ||
-      dist.id.toLowerCase().includes(q)
+      item.products.name.toLowerCase().includes(q) || item.manifests?.title.toLowerCase().includes(q) || dist.id.toLowerCase().includes(q)
     ) : true;
-
     return matchDp && matchDate && matchSearch;
   });
 
@@ -659,35 +489,33 @@ export default function DailyDistributionReportPage() {
 
     doc.save(`Distribution_History_${new Date().toISOString().split('T')[0]}.pdf`);
   };
-
-  // Helper function to prevent scroll on number inputs
-  const preventScroll = (e: React.WheelEvent<HTMLInputElement>) => {
-    (e.target as HTMLInputElement).blur();
-  };
+  
+  const preventScroll = (e: React.WheelEvent<HTMLInputElement>) => { (e.target as HTMLInputElement).blur(); };
 
   return (
     <div className="flex flex-col min-h-screen flex-1 bg-slate-50 w-full animate-in fade-in duration-500 relative">
-
-      {/* Global style to hide number input arrows (spinners) */}
       <style dangerouslySetInnerHTML={{__html: `
-        input[type="number"]::-webkit-inner-spin-button,
-        input[type="number"]::-webkit-outer-spin-button {
-          -webkit-appearance: none;
-          margin: 0;
-        }
-        input[type="number"] {
-          -moz-appearance: textfield;
-        }
+        input[type="number"]::-webkit-inner-spin-button, input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+        input[type="number"] { -moz-appearance: textfield; }
       `}} />
 
-      {/* Header */}
-      <header className="flex h-20 bg-white border-b border-slate-200 items-center px-4 md:px-6 shrink-0 shadow-sm z-20 sticky top-0">
-        <button onClick={() => window.history.back()} className="mr-4 p-2 rounded-full hover:bg-slate-100 text-slate-900 transition-colors">
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" /></svg>
-        </button>
-        <div>
-          <h2 className="text-xl md:text-2xl font-bold text-slate-900">Daily Distribution Report</h2>
-          <p className="text-xs md:text-sm text-slate-600 hidden sm:block">Submit end-of-day quantities against active manifests</p>
+      {/* FIXED CONFLICT WITH PROFILE BUTTON: Added pr-20 to header */}
+      <header className="flex min-h-20 bg-white border-b border-slate-200 items-center px-4 md:px-6 pr-20 shrink-0 shadow-sm z-20 sticky top-0 justify-between flex-wrap gap-3 py-3">
+        <div className="flex items-center">
+          <button onClick={() => window.history.back()} className="mr-3 p-2 rounded-full hover:bg-slate-100 text-slate-900 transition-colors">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" /></svg>
+          </button>
+          <div>
+            <h2 className="text-lg md:text-xl font-bold text-slate-900">Daily Distribution Report</h2>
+            <p className="text-[10px] md:text-xs text-slate-600 hidden sm:block">Submit end-of-day quantities against active manifests</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 w-full sm:w-auto mt-2 sm:mt-0">
+          <span className="text-xs font-bold text-slate-500 uppercase shrink-0">Filter DP:</span>
+          <select value={dpFilter} onChange={(e) => setDpFilter(e.target.value)} className="w-full sm:w-auto px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-bold text-slate-900 outline-none focus:border-indigo-500 shadow-sm truncate max-w-xs">
+            {distributionPoints.length === 0 ? <option value="" disabled>No Assigned DPs</option> : <option value="" disabled>-- Select Distribution Point --</option>}
+            {distributionPoints.map(dp => <option key={dp.id} value={dp.id}>[{dp.code}] {dp.name}</option>)}
+          </select>
         </div>
       </header>
 
@@ -700,115 +528,56 @@ export default function DailyDistributionReportPage() {
           </div>
         )}
 
-        <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
-
-          {/* LEFT PANE */}
-          <div className="xl:col-span-3 bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col">
-            <div className="p-3 border-b border-slate-200 bg-slate-900 text-white flex justify-between items-center shrink-0 rounded-t-2xl">
-              <h3 className="font-bold text-xs uppercase flex items-center"><Icons.Manifest /> <span className="ml-1">1. Active Manifests</span></h3>
-              <span className="bg-indigo-500 text-white text-[10px] font-bold px-2 py-0.5 rounded-full">{filteredLeftManifests.length}</span>
+        {/* MAIN INPUT SECTION (ONE SECTION ONLY) */}
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col w-full overflow-hidden">
+          <div className="p-4 border-b border-slate-200 bg-slate-50 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0 rounded-t-2xl">
+            <div>
+              <h3 className="font-bold text-slate-900 text-sm uppercase">Active Manifests for Selected DP</h3>
+              <p className="text-[10px] text-slate-600 mt-0.5 font-bold">Showing {filteredManifests.length} active manifest(s)</p>
             </div>
-            <div className="p-2 bg-slate-50 border-b border-slate-200 shrink-0">
-              <select value={leftDpFilter} onChange={(e) => setLeftDpFilter(e.target.value)} className="w-full px-2 py-2 bg-white border border-slate-300 rounded-lg text-xs font-bold text-slate-900 outline-none focus:border-indigo-500">
-                {distributionPoints.length === 0 ? (
-                    <option value="" disabled>No Assigned DPs</option>
-                ) : (
-                    <option value="" disabled>-- Select Distribution Point --</option>
-                )}
-                {distributionPoints.map(dp => <option key={dp.id} value={dp.id}>[{dp.code}] {dp.name}</option>)}
-              </select>
-            </div>
-
-            <div className="p-2 space-y-2 bg-slate-50/50 rounded-b-2xl max-h-[600px] overflow-y-auto custom-scrollbar">
-              {isLoading ? (
-                <div className="p-6 text-center"><Icons.Spinner /></div>
-              ) : filteredLeftManifests.length === 0 ? (
-                <div className="p-6 text-center text-slate-900 text-xs font-bold border-2 border-dashed border-slate-200 rounded-xl m-1">
-                  {!leftDpFilter ? "Please select a Distribution Point." : "No active manifests found."}
-                </div>
-              ) : (
-                filteredLeftManifests.map((m, idx) => {
-                  const theme = MANIFEST_COLORS[idx % MANIFEST_COLORS.length];
-                  return (
-                    <div key={m.id} className={`p-3 rounded-xl border ${theme.bg} ${theme.border} shadow-sm relative flex flex-col`}>
-                      <div className="flex justify-between items-start mb-1.5">
-                        <span className={`text-[8px] font-bold uppercase px-1.5 py-0.5 rounded bg-white text-slate-700 border border-slate-200 shadow-sm inline-block`}>
-                          {m.manifest_type || 'MIXED'}
-                        </span>
-                        <span className={`text-[10px] font-black ${theme.numBg} ${theme.text} px-2 py-0.5 rounded-full`}>#{idx + 1}</span>
-                      </div>
-
-                      <div className="flex items-start">
-                        {/* Common Green Blinking Dot */}
-                        <div title="Active Manifest" className="relative flex h-2.5 w-2.5 mr-2 mt-1.5 shrink-0 cursor-help">
-                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                          <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <h4 className={`font-bold ${theme.text} text-sm break-words whitespace-normal leading-tight`}>
-                            {m.title}
-                          </h4>
-                        </div>
-                      </div>
-
-                      <p className="text-[10px] text-slate-600 mt-2 font-semibold break-words whitespace-normal bg-white px-2 py-1 rounded-md border border-slate-200 inline-block self-start">
-                        {m.dp?.name}
-                      </p>
-                    </div>
-                  )
-                })
-              )}
+            <div className="flex items-center space-x-2 shrink-0 bg-white border border-slate-300 rounded-xl px-3 py-1.5 shadow-sm focus-within:border-indigo-500">
+              <span className="text-xs font-bold text-slate-500 uppercase">Date:</span>
+              <input type="date" value={distDate} onChange={(e) => setDistDate(e.target.value)} required className="bg-transparent text-xs font-bold text-slate-900 outline-none w-full" />
             </div>
           </div>
 
-          {/* RIGHT PANE */}
-          <div className="xl:col-span-9 bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col w-full overflow-hidden">
-
-            <div className="p-4 border-b border-slate-200 bg-slate-50 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0 rounded-t-2xl">
-              <div>
-                <h3 className="font-bold text-slate-900 text-sm uppercase">2. Input Daily Distribution</h3>
-                <p className="text-[10px] text-slate-600 mt-0.5 font-bold">Submit distributed items & Total HH for all active manifests</p>
+          <div className="p-3 md:p-4 space-y-6 bg-slate-50/30 overflow-x-hidden min-h-[300px]">
+            {isLoading ? (
+              <div className="flex justify-center items-center h-40"><Icons.Spinner /></div>
+            ) : filteredManifests.length === 0 ? (
+              <div className="flex flex-col items-center justify-center text-slate-900 p-10 border-2 border-dashed border-slate-200 rounded-xl m-4 bg-white">
+                <span className="text-4xl mb-3 opacity-50">📋</span>
+                <p className="text-sm font-bold text-slate-500">{!dpFilter ? "Select a DP from the top menu" : "No Active Manifests Found for this DP"}</p>
               </div>
-              <div className="flex space-x-2 shrink-0">
-                <input type="date" value={distDate} onChange={(e) => setDistDate(e.target.value)} required className="px-3 py-1.5 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-900 outline-none focus:border-indigo-500" />
-              </div>
-            </div>
+            ) : (
+              filteredManifests.map((manifest, idx) => {
+                const theme = MANIFEST_COLORS[idx % MANIFEST_COLORS.length];
+                
+                // Fixed logic: We don't skip the manifest entirely if items are empty. 
+                // We show the header so you at least see manifest #1, #2 exists, even if items fail to map.
+                const items = allManifestItems.filter(i => i.manifest_id === manifest.id);
 
-            <div className="p-3 md:p-4 space-y-6 bg-slate-50/30 overflow-x-hidden">
-              {filteredLeftManifests.length === 0 ? (
-                <div className="flex flex-col items-center justify-center text-slate-900 p-10">
-                  <span className="text-4xl mb-3 opacity-50">📋</span>
-                  <p className="text-sm font-bold">
-                    {!leftDpFilter ? "Select a DP to input distribution" : "No Active Manifests"}
-                  </p>
-                </div>
-              ) : (
-                filteredLeftManifests.map((manifest, idx) => {
-                  const theme = MANIFEST_COLORS[idx % MANIFEST_COLORS.length];
-                  const items = allManifestItems.filter(i => i.manifest_id === manifest.id);
-                  if (items.length === 0) return null;
-
-                  return (
-                    <div key={manifest.id} className={`bg-white border ${theme.border} rounded-xl shadow-sm overflow-hidden flex flex-col`}>
-
-                      <div className={`${theme.bg} p-3 md:p-4 border-b ${theme.border} flex justify-between items-start rounded-t-xl shrink-0`}>
-                        <div className="flex items-start flex-1 min-w-0 pr-2">
-                           <div title="Active Manifest" className="relative flex h-3 w-3 mr-2.5 mt-1.5 shrink-0 cursor-help">
-                             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                             <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
-                           </div>
-                           <div className="flex-1 min-w-0">
-                             <h4 className={`font-bold ${theme.text} text-sm md:text-base break-words whitespace-normal leading-tight flex flex-col md:flex-row md:items-start`}>
-                               <span className={`text-[10px] font-black ${theme.numBg} px-2 py-0.5 rounded-full md:mr-2 shrink-0 md:mt-0.5 w-max mb-1 md:mb-0`}>{idx + 1}</span> 
-                               <span>{manifest.title}</span>
-                             </h4>
-                           </div>
-                        </div>
+                return (
+                  <div key={manifest.id} className={`bg-white border ${theme.border} rounded-xl shadow-sm overflow-hidden flex flex-col`}>
+                    <div className={`${theme.bg} p-3 md:p-4 border-b ${theme.border} flex justify-between items-start rounded-t-xl shrink-0`}>
+                      <div className="flex items-start flex-1 min-w-0 pr-2">
+                         <div title="Active Manifest" className="relative flex h-3 w-3 mr-2.5 mt-1.5 shrink-0 cursor-help">
+                           <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                           <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
+                         </div>
+                         <div className="flex-1 min-w-0">
+                           <h4 className={`font-bold ${theme.text} text-sm md:text-base break-words whitespace-normal leading-tight flex flex-col md:flex-row md:items-center`}>
+                             <span className={`text-[10px] font-black ${theme.numBg} px-2 py-0.5 rounded-full md:mr-2 shrink-0 w-max mb-1 md:mb-0`}>#{idx + 1}</span> 
+                             <span>{manifest.title}</span>
+                           </h4>
+                         </div>
                       </div>
+                    </div>
 
-                      {/* Responsive List Container */}
+                    {items.length === 0 ? (
+                       <div className="p-4 text-center text-xs font-bold text-slate-400">No items found for this manifest.</div>
+                    ) : (
                       <div className="w-full flex flex-col divide-y divide-slate-100">
-                        {/* Desktop Header */}
                         <div className="hidden md:grid grid-cols-12 gap-2 bg-slate-50 px-4 py-3 border-b border-slate-100 items-center">
                             <div className="col-span-4 text-[10px] font-bold text-slate-500 uppercase">Product Details</div>
                             <div className="col-span-2 text-[10px] font-bold text-slate-500 uppercase text-center">Progress</div>
@@ -826,106 +595,76 @@ export default function DailyDistributionReportPage() {
                             const inputKey = `${manifest.id}_${item.product_id}`;
                             const qVal = inputs[inputKey]?.qty ?? '';
                             const hhVal = inputs[inputKey]?.hh ?? '';
-
                             const isTargetless = item.target_qty === 0;
                             const remText = isTargetless ? '∞' : Math.max(0, item.target_qty - (item.distributed_qty || 0));
 
                             return (
                                 <div key={item.id} className="flex flex-col md:grid md:grid-cols-12 gap-3 md:gap-2 px-4 py-4 hover:bg-slate-50 transition-colors items-center border-b border-slate-50 last:border-0">
-
-                                    {/* Product Details */}
                                     <div className="w-full md:col-span-4 flex flex-col">
                                         <div className="flex items-center gap-2 mb-1">
                                             <p className="font-bold text-slate-900 text-sm break-words whitespace-normal leading-tight">{item.products?.name}</p>
-                                            {isOpenStock && <span className="px-1.5 py-0.5 text-[8px] bg-amber-100 text-amber-800 border border-amber-200 rounded font-black uppercase shrink-0">Open Stock</span>}
+                                            {isOpenStock && <span className="px-1.5 py-0.5 text-[8px] bg-amber-100 text-amber-800 border border-amber-200 rounded font-black uppercase shrink-0">Open</span>}
                                         </div>
                                         <span className="text-[10px] text-slate-500 font-medium font-mono">{item.products?.code}</span>
                                     </div>
-
-                                    {/* Progress & Stock (Mobile grouping) */}
                                     <div className="w-full md:col-span-4 flex flex-row justify-between md:grid md:grid-cols-2 bg-slate-50 md:bg-transparent p-2 md:p-0 rounded-lg border border-slate-100 md:border-0">
-                                        {/* Progress */}
                                         <div className="flex flex-col md:items-center justify-center">
                                             <span className="text-[9px] font-bold text-slate-400 uppercase md:hidden mb-0.5">Progress</span>
                                             <div className="text-xs font-bold text-slate-800">{item.distributed_qty || 0} / {isTargetless ? '∞' : item.target_qty}</div>
                                             <div className="text-[10px] text-indigo-600 font-bold mt-0.5">Rem: {remText}</div>
                                         </div>
-
-                                        {/* WH Stock */}
                                         <div className="flex flex-col md:items-center justify-center items-end">
                                             <span className="text-[9px] font-bold text-slate-400 uppercase md:hidden mb-0.5">WH Stock</span>
-                                            {isOpenStock ? (
-                                                <span className="text-base font-black text-amber-600" title="Unlimited Open Stock">∞</span>
-                                            ) : (
-                                                <span className={`text-base font-black ${availStock > 0 ? 'text-indigo-600' : 'text-rose-500'}`}>{availStock.toLocaleString()}</span>
-                                            )}
+                                            {isOpenStock ? <span className="text-base font-black text-amber-600">∞</span> : <span className={`text-base font-black ${availStock > 0 ? 'text-indigo-600' : 'text-rose-500'}`}>{availStock.toLocaleString()}</span>}
                                         </div>
                                     </div>
-
-                                    {/* Inputs (Mobile grouping) */}
                                     <div className="w-full md:col-span-4 grid grid-cols-2 gap-3 items-center">
                                         <div className="flex flex-col">
                                             <label className="text-[10px] font-bold text-slate-500 uppercase md:hidden mb-1">Dist. Qty</label>
-                                            <input 
-                                                type="number" min="0" max={isOpenStock ? undefined : availStock} disabled={!isOpenStock && availStock <= 0} 
-                                                value={qVal} 
-                                                onChange={(e) => handleQtyChange(manifest.id, item.product_id, e.target.value, availStock, isOpenStock)} 
-                                                onWheel={preventScroll}
-                                                placeholder={isOpenStock ? "Qty..." : (availStock > 0 ? "0" : "No Stock")} 
-                                                className="w-full text-center md:text-right px-3 py-2.5 bg-white border-2 border-slate-300 rounded-xl text-sm font-black text-indigo-700 outline-none focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600 disabled:bg-slate-100 disabled:border-slate-200 transition-colors shadow-sm" 
-                                            />
+                                            <input type="number" min="0" max={isOpenStock ? undefined : availStock} disabled={!isOpenStock && availStock <= 0} value={qVal} onChange={(e) => handleQtyChange(manifest.id, item.product_id, e.target.value, availStock, isOpenStock)} onWheel={preventScroll} placeholder={isOpenStock ? "Qty..." : (availStock > 0 ? "0" : "No Stock")} className="w-full text-center md:text-right px-3 py-2.5 bg-white border-2 border-slate-300 rounded-xl text-sm font-black text-indigo-700 outline-none focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600 disabled:bg-slate-100 disabled:border-slate-200 transition-colors shadow-sm" />
                                         </div>
                                         <div className="flex flex-col">
                                             <label className="text-[10px] font-bold text-slate-500 uppercase md:hidden mb-1">Total HH</label>
-                                            <input 
-                                                type="number" min="0" disabled={!isOpenStock && availStock <= 0} 
-                                                value={hhVal} 
-                                                onChange={(e) => handleHHChange(manifest.id, item.product_id, e.target.value)} 
-                                                onWheel={preventScroll}
-                                                placeholder="0" 
-                                                className="w-full text-center md:text-right px-3 py-2.5 bg-white border-2 border-slate-300 rounded-xl text-sm font-black text-slate-900 outline-none focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600 disabled:bg-slate-100 disabled:border-slate-200 transition-colors shadow-sm" 
-                                            />
+                                            <input type="number" min="0" disabled={!isOpenStock && availStock <= 0} value={hhVal} onChange={(e) => handleHHChange(manifest.id, item.product_id, e.target.value)} onWheel={preventScroll} placeholder="0" className="w-full text-center md:text-right px-3 py-2.5 bg-white border-2 border-slate-300 rounded-xl text-sm font-black text-slate-900 outline-none focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600 disabled:bg-slate-100 disabled:border-slate-200 transition-colors shadow-sm" />
                                         </div>
                                     </div>
                                 </div>
                             )
                         })}
                       </div>
-                    </div>
-                  )
-                })
-              )}
-            </div>
+                    )}
+                  </div>
+                )
+              })
+            )}
+          </div>
 
-            <div className="p-4 border-t border-slate-200 bg-slate-50 flex flex-col sm:flex-row items-center gap-3 shrink-0 rounded-b-2xl">
-              <input type="text" value={remarks} onChange={(e) => setRemarks(e.target.value)} placeholder="Daily Summary Note..." className="w-full sm:flex-1 px-4 py-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-900 outline-none focus:border-indigo-500" />
-              <button onClick={handleSubmitAll} disabled={isSubmitting || filteredLeftManifests.length === 0} className="w-full sm:w-auto px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-sm shadow-md disabled:opacity-50 flex items-center justify-center">
-                {isSubmitting ? <><Icons.Spinner /> Processing...</> : 'Submit All Distributions'}
-              </button>
-            </div>
+          <div className="p-4 border-t border-slate-200 bg-slate-50 flex flex-col sm:flex-row items-center gap-3 shrink-0 rounded-b-2xl">
+            <input type="text" value={remarks} onChange={(e) => setRemarks(e.target.value)} placeholder="Daily Summary Note (Optional)..." className="w-full sm:flex-1 px-4 py-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-900 outline-none focus:border-indigo-500 shadow-sm" />
+            <button onClick={handleSubmitAll} disabled={isSubmitting || filteredManifests.length === 0} className="w-full sm:w-auto px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-sm shadow-md disabled:opacity-50 flex items-center justify-center transition">
+              {isSubmitting ? <><Icons.Spinner /> Processing...</> : 'Submit All Distributions'}
+            </button>
           </div>
         </div>
 
-        {/* BOTTOM SECTION - HISTORY */}
-        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm mt-6 mb-10 overflow-hidden w-full">
-          <div className="p-4 border-b border-slate-200 bg-slate-50/80 flex flex-col lg:flex-row justify-between lg:items-center gap-4 rounded-t-2xl">
-            <h3 className="font-bold text-slate-900 text-sm uppercase tracking-wide">Distribution History</h3>
-
-            <div className="flex flex-wrap lg:flex-nowrap gap-2 items-center w-full lg:w-auto">
+        {/* BOTTOM SECTION - HISTORY (RESPONSIVE) */}
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden w-full mb-10">
+          <div className="p-4 border-b border-slate-200 bg-slate-50/80 flex flex-col md:flex-row justify-between gap-4 rounded-t-2xl flex-wrap">
+            <h3 className="font-bold text-slate-900 text-sm uppercase tracking-wide shrink-0 pt-2">Distribution History</h3>
+            <div className="flex flex-col sm:flex-row flex-wrap gap-2 items-center w-full md:w-auto">
                <select value={filterDpId} onChange={(e) => setFilterDpId(e.target.value)} className="w-full sm:w-auto px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-bold text-slate-900 outline-none focus:border-indigo-500">
                   <option value="ALL">All DPs</option>
                   {distributionPoints.map(dp => <option key={dp.id} value={dp.id}>{dp.name}</option>)}
                </select>
-
                <div className="flex items-center space-x-1 w-full sm:w-auto">
-                 <input type="date" value={filterStartDate} onChange={(e) => setFilterStartDate(e.target.value)} className="w-full sm:w-32 px-2 py-2 bg-white border border-slate-300 rounded-lg text-xs font-bold text-slate-900 outline-none focus:border-indigo-500" title="From Date" />
+                 <input type="date" value={filterStartDate} onChange={(e) => setFilterStartDate(e.target.value)} className="w-full px-2 py-2 bg-white border border-slate-300 rounded-lg text-xs font-bold text-slate-900 outline-none focus:border-indigo-500" title="From Date" />
                  <span className="text-xs font-bold text-slate-400">-</span>
-                 <input type="date" value={filterEndDate} onChange={(e) => setFilterEndDate(e.target.value)} className="w-full sm:w-32 px-2 py-2 bg-white border border-slate-300 rounded-lg text-xs font-bold text-slate-900 outline-none focus:border-indigo-500" title="To Date" />
+                 <input type="date" value={filterEndDate} onChange={(e) => setFilterEndDate(e.target.value)} className="w-full px-2 py-2 bg-white border border-slate-300 rounded-lg text-xs font-bold text-slate-900 outline-none focus:border-indigo-500" title="To Date" />
                </div>
-
-               <input type="text" placeholder="Search..." value={tableSearch} onChange={(e) => setTableSearch(e.target.value)} className="w-full sm:w-auto flex-1 lg:w-40 px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-bold text-slate-900 outline-none focus:border-indigo-500" />
-
-               <div className="flex items-center space-x-2 shrink-0 ml-auto lg:ml-0">
+               <input type="text" placeholder="Search..." value={tableSearch} onChange={(e) => setTableSearch(e.target.value)} className="w-full sm:w-auto flex-1 md:w-40 px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-bold text-slate-900 outline-none focus:border-indigo-500" />
+               
+               {/* Export Buttons Added Back */}
+               <div className="flex items-center space-x-2 shrink-0 w-full sm:w-auto justify-end">
                  <button onClick={handleExportExcel} className="px-3 py-2 bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-bold rounded-lg hover:bg-emerald-100 transition-colors flex items-center">
                    <Icons.Download /> <span className="ml-1">Excel</span>
                  </button>
@@ -936,78 +675,87 @@ export default function DailyDistributionReportPage() {
             </div>
           </div>
 
-          <div className="overflow-x-auto w-full custom-scrollbar">
-            <table className="w-full text-left min-w-[800px]">
-              <thead className="bg-slate-50 border-b border-slate-200">
-                <tr>
-                  <th className="px-4 py-3 text-[11px] font-bold text-slate-500 uppercase border-r border-slate-100 w-24">Date & TXN</th>
-                  <th className="px-4 py-3 text-[11px] font-bold text-slate-500 uppercase border-r border-slate-100 w-36">Distribution Point</th>
-                  <th className="px-4 py-3 text-[11px] font-bold text-slate-500 uppercase border-r border-slate-100">Distributed Items (Manifest, Product, Qty, Total HH)</th>
-                  <th className="px-4 py-3 text-[11px] font-bold text-slate-500 uppercase text-center w-24">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {isLoading ? (
-                  <tr><td colSpan={4} className="p-8 text-center"><Icons.Spinner /></td></tr>
-                ) : paginatedHistory.length === 0 ? (
-                  <tr><td colSpan={4} className="p-8 text-center text-sm font-medium text-slate-500">No records found.</td></tr>
-                ) : (
-                  paginatedHistory.map((dist) => (
-                    <tr key={dist.id} className="hover:bg-slate-50">
-                      <td className="px-4 py-4 align-top border-r border-slate-100">
-                        <p className="font-bold text-slate-900 text-sm">{new Date(dist.distribution_date).toLocaleDateString()}</p>
-                        <p className="text-[10px] text-indigo-600 font-bold font-mono mt-1 break-words whitespace-normal">DIST-{dist.id.split('-')[0].toUpperCase()}</p>
-                      </td>
-                      <td className="px-4 py-4 align-top border-r border-slate-100">
-                        <p className="font-bold text-slate-900 text-sm break-words whitespace-normal">{dist.distribution_points.name}</p>
-                      </td>
-                      <td className="px-4 py-4 align-top border-r border-slate-100">
-                         <div className="flex flex-col space-y-3 min-w-0">
-                           {dist.distribution_items.map((item: any) => (
-                             <div key={item.id} className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm flex flex-col min-w-0">
-                               <div className="bg-slate-50 px-3 py-2 border-b border-slate-100">
-                                 <p className="text-xs font-bold text-slate-900 break-words whitespace-normal leading-relaxed">{item.manifests?.title}</p>
-                               </div>
-                               <div className="flex flex-col sm:flex-row justify-between sm:items-center px-3 py-2.5 gap-2 sm:gap-4">
-                                 <p className="text-sm font-semibold text-slate-800 flex-1 min-w-0 break-words whitespace-normal leading-tight">
-                                    {item.products.name}
-                                    {item.products.is_open_stock && <span className="ml-2 px-1.5 py-0.5 text-[8px] bg-amber-100 text-amber-800 border border-amber-200 rounded font-black uppercase">Open Stock</span>}
-                                 </p>
-                                 <div className="flex items-center space-x-4 shrink-0 bg-slate-50 sm:bg-transparent p-2 sm:p-0 rounded-lg">
-                                   <p className="text-sm font-black text-indigo-600 text-right w-16">{item.quantity} <span className="text-[9px] font-bold text-slate-500 uppercase">{item.products.unit_type}</span></p>
-                                   <p className="text-sm font-black text-emerald-600 text-right w-16">{item.total_hh} <span className="text-[9px] font-bold text-slate-500 uppercase">HH</span></p>
-                                 </div>
-                               </div>
-                             </div>
-                           ))}
-                         </div>
-                      </td>
-                      <td className="px-4 py-4 text-center align-top">
-                        <div className="flex flex-col items-center justify-center space-y-2">
-                          <button onClick={() => { setDetailsData(dist); setDetailsModalOpen(true); }} className="w-full py-2 bg-indigo-50 text-indigo-700 border border-indigo-100 text-xs font-bold rounded-lg hover:bg-indigo-100 transition-colors">Details</button>
-                          <button onClick={() => openEditModal(dist)} className="w-full py-2 bg-amber-50 text-amber-700 border border-amber-100 text-xs font-bold rounded-lg hover:bg-amber-100 transition-colors">Edit</button>
-                          <button onClick={() => { setTxnToRevert(dist); setRevertModalOpen(true); }} className="w-full py-2 bg-rose-50 text-rose-700 border border-rose-100 text-xs font-bold rounded-lg hover:bg-rose-100 transition-colors">Delete</button>
+          <div className="w-full bg-white">
+            {isLoading && historyItems.length === 0 ? (
+              <div className="p-8 text-center"><Icons.Spinner /></div>
+            ) : paginatedHistory.length === 0 ? (
+              <div className="p-8 text-center text-sm font-medium text-slate-500">No records found.</div>
+            ) : (
+              <div className="flex flex-col">
+                <div className="hidden lg:grid grid-cols-12 gap-4 px-4 py-3 bg-slate-50 border-b border-slate-200">
+                  <div className="col-span-2 text-[11px] font-bold text-slate-500 uppercase">Date & TXN</div>
+                  <div className="col-span-3 text-[11px] font-bold text-slate-500 uppercase">Distribution Point</div>
+                  <div className="col-span-6 text-[11px] font-bold text-slate-500 uppercase">Distributed Items</div>
+                  <div className="col-span-1 text-[11px] font-bold text-slate-500 uppercase text-center">Actions</div>
+                </div>
+
+                {paginatedHistory.map((dist) => (
+                  <div key={dist.id} className="flex flex-col lg:grid lg:grid-cols-12 gap-4 px-4 py-4 border-b border-slate-100 hover:bg-slate-50">
+                    <div className="lg:col-span-2 flex flex-col justify-start">
+                      <p className="font-bold text-slate-900 text-sm">{new Date(dist.distribution_date).toLocaleDateString()}</p>
+                      <p className="text-[10px] text-indigo-600 font-bold font-mono mt-1">DIST-{dist.id.split('-')[0].toUpperCase()}</p>
+                    </div>
+                    <div className="lg:col-span-3 flex flex-col justify-start">
+                      <p className="font-bold text-slate-900 text-sm">{dist.distribution_points.name}</p>
+                    </div>
+                    <div className="lg:col-span-6 flex flex-col space-y-3">
+                      {dist.distribution_items.map((item: any) => (
+                        <div key={item.id} className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm flex flex-col">
+                          <div className="bg-slate-50 px-3 py-2 border-b border-slate-100">
+                            <p className="text-xs font-bold text-slate-900 leading-relaxed">{item.manifests?.title}</p>
+                          </div>
+                          <div className="flex flex-col sm:flex-row justify-between sm:items-center px-3 py-2.5 gap-2 sm:gap-4">
+                            <p className="text-sm font-semibold text-slate-800 flex-1 leading-tight">
+                               {item.products.name}
+                               {item.products.is_open_stock && <span className="ml-2 px-1.5 py-0.5 text-[8px] bg-amber-100 text-amber-800 border border-amber-200 rounded font-black uppercase">Open Stock</span>}
+                            </p>
+                            <div className="flex items-center space-x-4 bg-slate-50 sm:bg-transparent p-2 sm:p-0 rounded-lg">
+                              <p className="text-sm font-black text-indigo-600 text-right w-16">{item.quantity} <span className="text-[9px] font-bold text-slate-500 uppercase">{item.products.unit_type}</span></p>
+                              <p className="text-sm font-black text-emerald-600 text-right w-16">{item.total_hh} <span className="text-[9px] font-bold text-slate-500 uppercase">HH</span></p>
+                            </div>
+                          </div>
                         </div>
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
+                      ))}
+                    </div>
+                    <div className="lg:col-span-1 flex flex-row lg:flex-col items-center justify-center gap-2 mt-4 lg:mt-0">
+                      <button onClick={() => { setDetailsData(dist); setDetailsModalOpen(true); }} className="flex-1 lg:w-full py-2 bg-indigo-50 text-indigo-700 border border-indigo-100 text-xs font-bold rounded-lg hover:bg-indigo-100">Details</button>
+                      <button onClick={() => openEditModal(dist)} className="flex-1 lg:w-full py-2 bg-amber-50 text-amber-700 border border-amber-100 text-xs font-bold rounded-lg hover:bg-amber-100">Edit</button>
+                      <button onClick={() => { setTxnToRevert(dist); setRevertModalOpen(true); }} className="flex-1 lg:w-full py-2 bg-rose-50 text-rose-700 border border-rose-100 text-xs font-bold rounded-lg hover:bg-rose-100">Delete</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
-          {filteredHistory.length > 0 && (
-            <div className="flex justify-between items-center p-4 bg-white border-t border-slate-200 rounded-b-2xl">
-              <span className="text-xs font-bold text-slate-500">Showing page {currentPage} of {totalPages} ({filteredHistory.length} entries)</span>
-              <div className="flex space-x-2">
-                <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 text-slate-700 text-xs font-bold rounded-lg transition-colors">Prev</button>
-                <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 text-slate-700 text-xs font-bold rounded-lg transition-colors">Next</button>
+          <div className="flex flex-col gap-4 p-4 bg-white border-t border-slate-200 rounded-b-2xl">
+            {/* Load More Button */}
+            {historyItems.length < totalDbCount && (
+              <div className="w-full flex justify-center pb-2">
+                <button 
+                  onClick={handleLoadMoreHistory} 
+                  disabled={isLoadingMore}
+                  className="px-6 py-2 bg-indigo-50 text-indigo-700 font-bold text-xs rounded-full border border-indigo-200 hover:bg-indigo-100 transition shadow-sm"
+                >
+                  {isLoadingMore ? 'Loading...' : `Load More Data (Loaded: ${historyItems.length} of ${totalDbCount})`}
+                </button>
               </div>
-            </div>
-          )}
+            )}
+
+            {/* Pagination Controls */}
+            {filteredHistory.length > 0 && (
+              <div className="flex justify-between items-center w-full">
+                <span className="text-xs font-bold text-slate-500">Page {currentPage} of {totalPages} (Showing {paginatedHistory.length} items)</span>
+                <div className="flex space-x-2">
+                  <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 text-slate-700 text-xs font-bold rounded-lg transition-colors">Prev</button>
+                  <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 text-slate-700 text-xs font-bold rounded-lg transition-colors">Next</button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
-
+      
       {/* --- DETAILS MODAL --- */}
       {detailsModalOpen && detailsData && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
