@@ -4,9 +4,7 @@ const cors = require('cors');
 const { chromium } = require('playwright');
 const { createClient } = require('@supabase/supabase-js');
 const cron = require('node-cron');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
+const { exec } = require('child_process');
 
 const app = express();
 app.use(cors());
@@ -20,31 +18,24 @@ const browserOptions = {
 };
 
 // ==========================================
-// লাইভ লগ দেখার API (PM2 এর লগ ফাইল রিড করবে)
+// API: PM2 থেকে সরাসরি লাইভ লগ রিড করা
 // ==========================================
 app.get('/api/logs', (req, res) => {
-    try {
-        // PM2 এর ডিফল্ট লগ ফাইলের পাথ
-        const logPath = path.join(os.homedir(), '.pm2', 'logs', 'donor-bot-out.log');
-        
-        if (fs.existsSync(logPath)) {
-            const content = fs.readFileSync(logPath, 'utf8');
-            // শেষের ২০০ লাইন কেটে ফ্রন্টএন্ডে পাঠানো হচ্ছে
-            const lines = content.trim().split('\n').slice(-200); 
-            res.json({ success: true, logs: lines });
-        } else {
-            res.json({ success: true, logs: ["Log file not found yet. Start an action to generate logs."] });
+    // সরাসরি pm2 কমান্ড দিয়ে লগ আনা হচ্ছে
+    exec('pm2 logs donor-bot --lines 100 --raw --nostream', (error, stdout, stderr) => {
+        if (error) {
+            return res.json({ success: false, error: "Log fetch error: " + error.message });
         }
-    } catch(e) {
-        res.status(500).json({ success: false, error: e.message });
-    }
+        const lines = stdout.trim().split('\n').filter(line => line.length > 0);
+        res.json({ success: true, logs: lines.length > 0 ? lines : ["Waiting for logs..."] });
+    });
 });
 
 // ==========================================
 // কোর স্ক্র্যাপিং ফাংশন (সেভ করার জন্য)
 // ==========================================
 async function performScraping(targetDate) {
-    console.log(`\n⚙️ Starting Scraping Process for Date: ${targetDate}`);
+    console.log(`\n⚙️ [${new Date().toLocaleString()}] Starting Process for Date: ${targetDate}`);
     let browser;
     try {
         const { data: settings } = await supabase.from('automation_settings').select('*').single();
@@ -53,6 +44,7 @@ async function performScraping(targetDate) {
         const { data: mappings } = await supabase.from('warehouse_mappings').select('*');
         if (!mappings || mappings.length === 0) throw new Error("No warehouse mappings found.");
 
+        console.log("🌐 Launching headless browser...");
         browser = await chromium.launch(browserOptions); 
         const context = await browser.newContext();
         const page = await context.newPage();
@@ -85,7 +77,7 @@ async function performScraping(targetDate) {
             const whCode = map.donor_wh_code;
             const whName = map.donor_wh_name || whCode;
 
-            console.log(`▶️ Processing Mapped WH: ${whCode}`);
+            console.log(`▶️ Processing WH: ${whCode}`);
             try {
                 await page.selectOption('select[name="warehouse_id"]', whCode);
             } catch(e) {
@@ -115,7 +107,9 @@ async function performScraping(targetDate) {
                                 data.push({
                                     product_code: pCode,
                                     product_name: cols[2].innerText.trim(),
-                                    quantity: parseFloat(cols[4].innerText.replace(/,/g, '')) || 0
+                                    unit: cols[3].innerText.trim(),
+                                    quantity: parseFloat(cols[4].innerText.replace(/,/g, '')) || 0,
+                                    contingency_quantity: parseFloat(cols[5].innerText.replace(/,/g, '')) || 0 // Added this missing field
                                 });
                             }
                         }
@@ -126,7 +120,9 @@ async function performScraping(targetDate) {
                 const enrichedData = pageData.map(item => ({
                     ...item,
                     warehouse_code: whCode,
-                    warehouse_name: whName
+                    warehouse_name: whName,
+                    stock_date: targetDate,
+                    fetch_date: new Date().toISOString()
                 }));
 
                 allExtractedData.push(...enrichedData);
@@ -134,7 +130,7 @@ async function performScraping(targetDate) {
                 const isNextDisabled = await page.$eval('#stock-data-table_next', el => el.classList.contains('disabled')).catch(() => true);
                 if (!isNextDisabled) {
                     await page.click('#stock-data-table_next a');
-                    await page.waitForTimeout(1500); 
+                    await page.waitForTimeout(1000); 
                 } else {
                     hasNextPage = false;
                 }
@@ -143,26 +139,23 @@ async function performScraping(targetDate) {
         await browser.close();
 
         if (allExtractedData.length > 0) {
-            console.log(`💾 Saving ${allExtractedData.length} records for date: ${targetDate}`);
+            console.log(`💾 Scraped ${allExtractedData.length} total items. Saving to DB...`);
 
+            // Delete old data for this exact date to prevent duplicates
             await supabase.from('donor_warehouse_stock').delete().eq('stock_date', targetDate);
 
-            const dbPayload = allExtractedData.map(item => ({
-                ...item,
-                stock_date: targetDate,
-                fetch_date: new Date().toISOString()
-            }));
+            // Insert new data
+            const { error: insertErr } = await supabase.from('donor_warehouse_stock').insert(allExtractedData);
+            if (insertErr) throw new Error(`Supabase Insert Error: ${insertErr.message}`);
 
-            const { error: insertErr } = await supabase.from('donor_warehouse_stock').insert(dbPayload);
-            if (insertErr) throw new Error(`DB Insert Error: ${insertErr.message}`);
-
-            console.log("✅ Data successfully saved to DB!");
+            console.log("✅ Successfully saved to Supabase!");
             return allExtractedData.length;
         } else {
-            throw new Error("No data extracted from the donor site.");
+            console.log("⚠️ No data was found on the page.");
+            return 0;
         }
     } catch (error) {
-        console.log(`❌ Error: ${error.message}`);
+        console.log(`❌ Script Error: ${error.message}`);
         if(browser) await browser.close();
         throw error;
     }
@@ -193,7 +186,7 @@ app.get('/api/test-scrape', async (req, res) => {
         const targetMap = mappings ? mappings.find(m => m.donor_wh_code === targetWhCode) : null;
         const whName = targetMap ? targetMap.donor_wh_name : targetWhCode;
 
-        console.log(`\n🧪 Testing Fetch for WH: ${targetWhCode}`);
+        console.log(`\n🧪 [Test] Fetching WH: ${targetWhCode}`);
         browser = await chromium.launch(browserOptions); 
         const context = await browser.newContext();
         const page = await context.newPage();
@@ -268,7 +261,7 @@ app.get('/api/test-scrape', async (req, res) => {
             const isNextDisabled = await page.$eval('#stock-data-table_next', el => el.classList.contains('disabled')).catch(() => true);
             if (!isNextDisabled) {
                 await page.click('#stock-data-table_next a');
-                await page.waitForTimeout(1500); 
+                await page.waitForTimeout(1000); 
             } else {
                 hasNextPage = false;
             }
@@ -296,7 +289,7 @@ cron.schedule('* * * * *', async () => {
             const targetTime = settings.fetch_time.substring(0, 5); 
 
             if (currentDhakaTime === targetTime) {
-                console.log(`⏰ Scheduled Match! Dhaka Time is ${currentDhakaTime}. Running Automation...`);
+                console.log(`\n⏰ Scheduled Match! Dhaka Time is ${currentDhakaTime}. Running Automation...`);
                 let targetDate = new Date();
                 if (settings.is_previous_day_stock) {
                     targetDate.setDate(targetDate.getDate() - 1);

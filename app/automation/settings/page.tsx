@@ -37,6 +37,12 @@ export default function AutomationSettingsPage() {
   const [showPassModal, setShowPassModal] = useState(false);
   const [inputPass, setInputPass] = useState('');
 
+  // Delete Action State
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deleteDate, setDeleteDate] = useState('');
+  const [deleteWhCode, setDeleteWhCode] = useState('ALL');
+  const [isDeleting, setIsDeleting] = useState(false);
+
   // Test & Manual Fetch State
   const [testWhCode, setTestWhCode] = useState('');
   const [manualDate, setManualDate] = useState('');
@@ -57,6 +63,7 @@ export default function AutomationSettingsPage() {
     const today = new Date();
     const dateStr = new Date(today.getTime() - (today.getTimezoneOffset() * 60000)).toISOString().split('T')[0];
     setManualDate(dateStr); 
+    setDeleteDate(dateStr);
     loadData();
     fetchServerLogs();
   }, []);
@@ -109,13 +116,12 @@ export default function AutomationSettingsPage() {
           const result = await res.json();
           if (result.success && result.logs) {
               setServerLogs(result.logs);
-              // Scroll terminal to bottom
-              if (logsEndRef.current) {
+              if (logsEndRef.current && autoRefreshLogs) {
                   logsEndRef.current.scrollIntoView({ behavior: "smooth" });
               }
           }
       } catch (err) {
-          console.error("Failed to fetch logs");
+          // If server is unreachable
       }
   };
 
@@ -148,7 +154,7 @@ export default function AutomationSettingsPage() {
     setIsSaving(false);
   };
 
-  const handleUnlock = () => {
+  const handleUnlockCredentials = () => {
       if (inputPass === dbMgmtPass) {
           setIsCredentialsUnlocked(true);
           setShowPassModal(false);
@@ -158,11 +164,37 @@ export default function AutomationSettingsPage() {
       }
   };
 
+  const executeDeleteAction = async () => {
+      if (inputPass !== dbMgmtPass) {
+          alert("Incorrect Master Password!");
+          return;
+      }
+      setShowDeleteModal(false);
+      setInputPass('');
+      setIsDeleting(true);
+
+      try {
+          let query = supabase.from('donor_warehouse_stock').delete().eq('stock_date', deleteDate);
+          
+          if (deleteWhCode !== 'ALL') {
+              query = query.eq('warehouse_code', deleteWhCode);
+          }
+
+          const { error } = await query;
+          if (error) throw error;
+          
+          showMessage(`Successfully deleted data for ${deleteDate} ${deleteWhCode !== 'ALL' ? `(WH: ${deleteWhCode})` : '(All Warehouses)'}.`, "success");
+      } catch (error: any) {
+          showMessage(`Delete Failed: ${error.message}`, "error");
+      }
+      setIsDeleting(false);
+  };
+
   const handleLiveTest = async () => {
     if (!testWhCode) return showMessage("Please select a Donor Warehouse to test.", "error");
     setIsTesting(true);
     setTestData(null);
-    setAutoRefreshLogs(true); // Start showing logs automatically
+    setAutoRefreshLogs(true); 
     showMessage(`Initializing Test for WH [${testWhCode}] via ${BOT_SERVER_URL}...`, "success");
 
     try {
@@ -183,7 +215,7 @@ export default function AutomationSettingsPage() {
   const handleManualSave = async () => {
     if (!manualDate) return showMessage("Please select a date.", "error");
     setIsManualFetching(true);
-    setAutoRefreshLogs(true); // Show live process
+    setAutoRefreshLogs(true); 
     showMessage(`Fetching and saving data for ALL mapped warehouses... Please wait.`, "success");
 
     try {
@@ -231,7 +263,7 @@ export default function AutomationSettingsPage() {
   return (
     <div className="flex flex-col min-h-screen bg-slate-50 w-full animate-in fade-in duration-500 relative">
 
-      {/* PASSWORD MODAL */}
+      {/* CREDENTIALS UNLOCK MODAL */}
       {showPassModal && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
               <div className="bg-white p-6 rounded-2xl shadow-2xl w-full max-w-sm animate-in zoom-in-95">
@@ -243,11 +275,40 @@ export default function AutomationSettingsPage() {
                       onChange={(e) => setInputPass(e.target.value)} 
                       placeholder="••••••••"
                       className="w-full px-4 py-3 bg-slate-50 border border-slate-300 rounded-xl text-sm text-black font-bold outline-none focus:border-indigo-500 mb-4"
-                      onKeyDown={(e) => { if(e.key === 'Enter') handleUnlock(); }}
+                      onKeyDown={(e) => { if(e.key === 'Enter') handleUnlockCredentials(); }}
                   />
                   <div className="flex space-x-3">
                       <button onClick={() => { setShowPassModal(false); setInputPass(''); }} className="flex-1 py-2.5 bg-slate-100 text-slate-600 font-bold rounded-xl text-sm hover:bg-slate-200">Cancel</button>
-                      <button onClick={handleUnlock} className="flex-1 py-2.5 bg-indigo-600 text-white font-bold rounded-xl text-sm hover:bg-indigo-700">Unlock</button>
+                      <button onClick={handleUnlockCredentials} className="flex-1 py-2.5 bg-indigo-600 text-white font-bold rounded-xl text-sm hover:bg-indigo-700">Unlock</button>
+                  </div>
+              </div>
+          </div>
+      )}
+
+      {/* DELETE DATA MODAL */}
+      {showDeleteModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+              <div className="bg-white p-6 rounded-2xl shadow-2xl w-full max-w-md animate-in zoom-in-95">
+                  <div className="flex items-center gap-3 mb-2 text-rose-600">
+                      <span className="text-2xl">⚠️</span>
+                      <h3 className="font-bold text-lg text-slate-900">Confirm Deletion</h3>
+                  </div>
+                  <p className="text-xs text-slate-500 mb-4 bg-rose-50 p-3 rounded-lg border border-rose-100">
+                      You are about to delete stock data for <b className="text-rose-700">{deleteDate}</b> 
+                      from <b className="text-rose-700">{deleteWhCode === 'ALL' ? 'ALL Warehouses' : `WH [${deleteWhCode}]`}</b>. 
+                      This action cannot be undone.
+                  </p>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Master Password</label>
+                  <input 
+                      type="password" 
+                      value={inputPass} 
+                      onChange={(e) => setInputPass(e.target.value)} 
+                      placeholder="Enter Management Password"
+                      className="w-full px-4 py-3 bg-slate-50 border border-slate-300 rounded-xl text-sm text-black font-bold outline-none focus:border-rose-500 mb-4"
+                  />
+                  <div className="flex space-x-3">
+                      <button onClick={() => { setShowDeleteModal(false); setInputPass(''); }} className="flex-1 py-2.5 bg-slate-100 text-slate-600 font-bold rounded-xl text-sm hover:bg-slate-200">Cancel</button>
+                      <button onClick={executeDeleteAction} disabled={!inputPass} className="flex-1 py-2.5 bg-rose-600 text-white font-bold rounded-xl text-sm hover:bg-rose-700 disabled:opacity-50">Permanently Delete</button>
                   </div>
               </div>
           </div>
@@ -353,10 +414,10 @@ export default function AutomationSettingsPage() {
                 </div>
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
 
                 {/* COLUMN 1: Configuration */}
-                <div className="space-y-6">
+                <div className="space-y-6 lg:col-span-1">
                     <form onSubmit={handleSaveSettings} className="space-y-6">
                         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
                             <div className="p-4 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
@@ -443,7 +504,7 @@ export default function AutomationSettingsPage() {
                 </div>
 
                 {/* COLUMN 2: Specific Live Test */}
-                <div className="space-y-6">
+                <div className="space-y-6 lg:col-span-1">
                     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden p-6 h-full flex flex-col justify-center relative">
                         <h3 className="font-bold text-lg mb-2 flex items-center text-slate-800"><span className="mr-2">🧪</span> Specific WH Test</h3>
                         <p className="text-xs text-slate-500 mb-6 leading-relaxed">
@@ -472,7 +533,7 @@ export default function AutomationSettingsPage() {
                 </div>
 
                 {/* COLUMN 3: FETCH AND SAVE ALL (MANUAL RUN) */}
-                <div className="space-y-6">
+                <div className="space-y-6 lg:col-span-1">
                     <div className="bg-gradient-to-br from-indigo-900 to-slate-900 rounded-2xl border border-slate-700 shadow-xl overflow-hidden p-6 h-full flex flex-col justify-center text-white relative">
                         <h3 className="font-bold text-lg mb-2 flex items-center"><span className="mr-2">⚡</span> Fetch & Save All</h3>
                         <p className="text-xs text-slate-400 mb-6 leading-relaxed">
@@ -493,6 +554,46 @@ export default function AutomationSettingsPage() {
 
                             <button onClick={handleManualSave} disabled={isManualFetching || mappings.length === 0 || !targetUrl} className="w-full bg-emerald-500 hover:bg-emerald-600 text-white font-black py-3 rounded-xl shadow-md flex justify-center disabled:opacity-50 uppercase tracking-widest text-xs mt-4">
                                 {isManualFetching ? <><Icons.Spinner /> Processing...</> : 'Fetch & Save Now'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                {/* COLUMN 4: DATABASE MANAGEMENT (DELETE DATA) */}
+                <div className="space-y-6 lg:col-span-1">
+                    <div className="bg-rose-50 rounded-2xl border border-rose-200 shadow-sm overflow-hidden p-6 h-full flex flex-col justify-center relative">
+                        <h3 className="font-bold text-lg mb-2 flex items-center text-rose-900"><span className="mr-2">🗑️</span> Delete Data</h3>
+                        <p className="text-xs text-rose-600 mb-6 leading-relaxed">
+                            Permanently remove fetched data for a specific date or warehouse to fix errors.
+                        </p>
+
+                        <div className="space-y-4 w-full">
+                            <div>
+                                <label className="block text-[10px] font-bold text-rose-700 uppercase mb-1.5">Target Date to Delete</label>
+                                <input 
+                                    type="date" 
+                                    value={deleteDate} 
+                                    onChange={(e) => setDeleteDate(e.target.value)} 
+                                    className="w-full px-4 py-3 bg-white border border-rose-300 text-sm text-rose-900 font-bold outline-none focus:border-rose-500 rounded-xl" 
+                                />
+                            </div>
+                            
+                            <div>
+                                <label className="block text-[10px] font-bold text-rose-700 uppercase mb-1.5">Select Warehouse</label>
+                                <select 
+                                    value={deleteWhCode} 
+                                    onChange={(e) => setDeleteWhCode(e.target.value)} 
+                                    className="w-full px-4 py-3 bg-white border border-rose-300 text-sm text-rose-900 font-bold outline-none focus:border-rose-500 rounded-xl cursor-pointer" 
+                                >
+                                    <option value="ALL">ALL Warehouses</option>
+                                    {mappings.map(m => (
+                                        <option key={m.id} value={m.donor_wh_code}>[{m.donor_wh_code}] {m.donor_wh_name}</option>
+                                    ))}
+                                </select>
+                            </div>
+
+                            <button onClick={() => setShowDeleteModal(true)} disabled={isDeleting || !deleteDate} className="w-full bg-rose-600 hover:bg-rose-700 text-white font-black py-3 rounded-xl shadow-sm flex justify-center disabled:opacity-50 uppercase tracking-widest text-xs mt-4">
+                                {isDeleting ? <><Icons.Spinner /> Deleting...</> : 'Delete Records'}
                             </button>
                         </div>
                     </div>
@@ -525,12 +626,12 @@ export default function AutomationSettingsPage() {
                         <span className="text-slate-500">Waiting for server logs... (Start an action or refresh)</span> 
                     ) : (
                         serverLogs.map((log, i) => {
-                            // Simple syntax coloring for logs
                             let colorClass = "text-slate-300";
                             if (log.includes("Error") || log.includes("❌") || log.includes("Failed")) colorClass = "text-rose-400";
-                            else if (log.includes("Success") || log.includes("✅") || log.includes("Done")) colorClass = "text-emerald-400";
+                            else if (log.includes("Success") || log.includes("✅") || log.includes("Done") || log.includes("Saved")) colorClass = "text-emerald-400";
                             else if (log.includes("⚠️")) colorClass = "text-amber-400";
-                            else if (log.includes("▶️") || log.includes("Processing")) colorClass = "text-cyan-400";
+                            else if (log.includes("▶️") || log.includes("Processing") || log.includes("Fetching")) colorClass = "text-cyan-400";
+                            else if (log.includes("⚙️") || log.includes("Starting")) colorClass = "text-indigo-400";
                             
                             return <div key={i} className={`whitespace-pre-wrap ${colorClass}`}>{log}</div>
                         })
