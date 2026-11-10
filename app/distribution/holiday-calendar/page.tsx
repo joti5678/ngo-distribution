@@ -25,7 +25,8 @@ export default function HolidayCalendarAdvanced() {
   const [systemDps, setSystemDps] = useState<any[]>([]);
   const [selectedDp, setSelectedDp] = useState<string>('ALL');
   
-  const [currentDate, setCurrentDate] = useState(new Date());
+  // FIX: SSR Error issue resolved by initializing with null
+  const [currentDate, setCurrentDate] = useState<Date | null>(null);
   const [weeklyDays, setWeeklyDays] = useState<number[]>([5, 6]); 
   
   const [isSettingsUnlocked, setIsSettingsUnlocked] = useState(false);
@@ -38,6 +39,11 @@ export default function HolidayCalendarAdvanced() {
   const [passModalOpen, setPassModalOpen] = useState(false);
   const [inputPassword, setInputPassword] = useState('');
   const [pendingAction, setPendingAction] = useState<{ type: string, payload?: any } | null>(null);
+
+  // FIX: Ensure currentDate is set only on the client side
+  useEffect(() => {
+    setCurrentDate(new Date());
+  }, []);
 
   const fetchData = useCallback(async () => {
     try {
@@ -65,6 +71,11 @@ export default function HolidayCalendarAdvanced() {
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  // FIX: Safety check before rendering date functions
+  if (!currentDate) {
+    return <div className="flex items-center justify-center h-screen bg-gray-50 text-gray-500 font-bold">Loading Calendar...</div>;
+  }
 
   const getDaysInMonth = (year: number, month: number) => new Date(year, month + 1, 0).getDate();
   const getFirstDayOfMonth = (year: number, month: number) => new Date(year, month, 1).getDay();
