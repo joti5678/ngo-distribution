@@ -4,7 +4,9 @@ const cors = require('cors');
 const { chromium } = require('playwright');
 const { createClient } = require('@supabase/supabase-js');
 const cron = require('node-cron');
-const { exec } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 
 const app = express();
 app.use(cors());
@@ -18,21 +20,28 @@ const browserOptions = {
 };
 
 // ==========================================
-// API: PM2 থেকে সরাসরি লাইভ লগ রিড করা
+// API: PM2 লগ ফাইল রিড করা
 // ==========================================
 app.get('/api/logs', (req, res) => {
-    // সরাসরি pm2 কমান্ড দিয়ে লগ আনা হচ্ছে
-    exec('pm2 logs donor-bot --lines 100 --raw --nostream', (error, stdout, stderr) => {
-        if (error) {
-            return res.json({ success: false, error: "Log fetch error: " + error.message });
+    try {
+        // আপনার সার্ভারের নির্দিষ্ট ইউজারনেম অনুযায়ী পাথ
+        // যদি লগ না আসে, তবে 'joti_on89' এর জায়গায় আপনার সার্ভারের ইউজারনেম দিতে হবে
+        const logPath = path.join('/home/joti_on89/.pm2/logs/donor-bot-out.log'); 
+        
+        if (fs.existsSync(logPath)) {
+            const content = fs.readFileSync(logPath, 'utf8');
+            const lines = content.trim().split('\n').slice(-150); 
+            res.json({ success: true, logs: lines });
+        } else {
+            res.json({ success: true, logs: ["Log file not found at " + logPath] });
         }
-        const lines = stdout.trim().split('\n').filter(line => line.length > 0);
-        res.json({ success: true, logs: lines.length > 0 ? lines : ["Waiting for logs..."] });
-    });
+    } catch(e) {
+        res.status(500).json({ success: false, error: e.message });
+    }
 });
 
 // ==========================================
-// কোর স্ক্র্যাপিং ফাংশন (সেভ করার জন্য)
+// কোর স্ক্র্যাপিং ফাংশন
 // ==========================================
 async function performScraping(targetDate) {
     console.log(`\n⚙️ [${new Date().toLocaleString()}] Starting Process for Date: ${targetDate}`);
@@ -104,12 +113,11 @@ async function performScraping(targetDate) {
                         if (cols.length >= 6 && !cols[0].innerText.includes('No data')) {
                             const pCode = cols[1].innerText.trim();
                             if (pCode) {
+                                // contingency_quantity রিমুভ করা হয়েছে
                                 data.push({
                                     product_code: pCode,
                                     product_name: cols[2].innerText.trim(),
-                                    unit: cols[3].innerText.trim(),
-                                    quantity: parseFloat(cols[4].innerText.replace(/,/g, '')) || 0,
-                                    contingency_quantity: parseFloat(cols[5].innerText.replace(/,/g, '')) || 0 // Added this missing field
+                                    quantity: parseFloat(cols[4].innerText.replace(/,/g, '')) || 0
                                 });
                             }
                         }
@@ -139,12 +147,9 @@ async function performScraping(targetDate) {
         await browser.close();
 
         if (allExtractedData.length > 0) {
-            console.log(`💾 Scraped ${allExtractedData.length} total items. Saving to DB...`);
-
-            // Delete old data for this exact date to prevent duplicates
+            console.log(`💾 Scraped ${allExtractedData.length} items. Saving to DB...`);
             await supabase.from('donor_warehouse_stock').delete().eq('stock_date', targetDate);
 
-            // Insert new data
             const { error: insertErr } = await supabase.from('donor_warehouse_stock').insert(allExtractedData);
             if (insertErr) throw new Error(`Supabase Insert Error: ${insertErr.message}`);
 
@@ -168,7 +173,6 @@ app.post('/api/manual-scrape', async (req, res) => {
         const count = await performScraping(date);
         res.json({ success: true, count: count });
     } catch (error) {
-        console.error("❌ Manual Fetch Failed:", error.message);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -219,10 +223,8 @@ app.get('/api/test-scrape', async (req, res) => {
 
         try {
             const lengthSelect = await page.$('select[name="stock-data-table_length"]');
-            if (lengthSelect) {
-                await page.selectOption('select[name="stock-data-table_length"]', '100');
-                await page.waitForTimeout(1000);
-            }
+            if (lengthSelect) await page.selectOption('select[name="stock-data-table_length"]', '100');
+            await page.waitForTimeout(1000);
         } catch(e) {}
 
         let allExtractedData = [];
@@ -241,8 +243,8 @@ app.get('/api/test-scrape', async (req, res) => {
                                 product_code: pCode,
                                 product_name: cols[2].innerText.trim(),
                                 unit: cols[3].innerText.trim(),
-                                quantity: parseFloat(cols[4].innerText.replace(/,/g, '')) || 0,
-                                contingency_quantity: parseFloat(cols[5].innerText.replace(/,/g, '')) || 0
+                                quantity: parseFloat(cols[4].innerText.replace(/,/g, '')) || 0
+                                // contingency_quantity রিমুভ করা হয়েছে
                             });
                         }
                     }
@@ -251,9 +253,7 @@ app.get('/api/test-scrape', async (req, res) => {
             });
 
             const enrichedData = pageData.map(item => ({
-                ...item,
-                donor_warehouse_code: targetWhCode,
-                warehouse_name: whName
+                ...item, donor_warehouse_code: targetWhCode, warehouse_name: whName
             }));
 
             allExtractedData.push(...enrichedData);
@@ -271,39 +271,12 @@ app.get('/api/test-scrape', async (req, res) => {
         console.log(`✅ Test Fetch Done! (${allExtractedData.length} records)`);
         res.json({ success: true, data: allExtractedData });
     } catch (error) {
-        console.log(`❌ Test Error: ${error.message}`);
         if(browser) await browser.close();
         res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-// ==========================================
-// অটো-শিডিউল (CRON JOB)
-// ==========================================
-cron.schedule('* * * * *', async () => {
-    try {
-        const { data: settings } = await supabase.from('automation_settings').select('is_active, fetch_time, is_previous_day_stock').single();
-        if (settings && settings.is_active && settings.fetch_time) {
-            const now = new Date();
-            const currentDhakaTime = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Dhaka', hour: '2-digit', minute: '2-digit', hour12: false }).format(now);
-            const targetTime = settings.fetch_time.substring(0, 5); 
-
-            if (currentDhakaTime === targetTime) {
-                console.log(`\n⏰ Scheduled Match! Dhaka Time is ${currentDhakaTime}. Running Automation...`);
-                let targetDate = new Date();
-                if (settings.is_previous_day_stock) {
-                    targetDate.setDate(targetDate.getDate() - 1);
-                }
-                await performScraping(targetDate.toISOString().split('T')[0]);
-            }
-        }
-    } catch (err) {
-        console.error("Cron Error:", err.message);
     }
 });
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
     console.log(`🤖 Automation API running on http://0.0.0.0:${PORT}`);
-    console.log(`⏱️ Cron scheduler active. Waiting for scheduled time...`);
 });

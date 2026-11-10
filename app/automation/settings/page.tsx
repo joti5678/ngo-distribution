@@ -9,15 +9,17 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
 );
 
-// 👇 এখানে আপনার Google Cloud সার্ভারের External IP টি দিন 👇
-const BOT_SERVER_URL = 'http://136.87.183.229:4000'; 
+// এখন আর সরাসরি আইপি দেওয়া লাগবে না। Next.js প্রক্সির মাধ্যমে কল যাবে।
+const BOT_API_BASE = '/bot-api'; 
 
 export default function AutomationSettingsPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
   const [isManualFetching, setIsManualFetching] = useState(false);
-  const [msg, setMsg] = useState({ text: '', type: '' });
+  
+  // Custom Alert Popup State
+  const [popup, setPopup] = useState<{ show: boolean, title: string, text: string, type: 'success' | 'error' | 'info' }>({ show: false, title: '', text: '', type: 'info' });
 
   // Config State
   const [settingsId, setSettingsId] = useState<string | null>(null);
@@ -68,7 +70,6 @@ export default function AutomationSettingsPage() {
     fetchServerLogs();
   }, []);
 
-  // Polling for live logs
   useEffect(() => {
       let interval: NodeJS.Timeout;
       if (autoRefreshLogs) {
@@ -77,9 +78,8 @@ export default function AutomationSettingsPage() {
       return () => clearInterval(interval);
   }, [autoRefreshLogs]);
 
-  const showMessage = (text: string, type: 'success' | 'error' = 'success') => {
-    setMsg({ text, type });
-    setTimeout(() => setMsg({ text: '', type: '' }), 6000);
+  const showAlert = (title: string, text: string, type: 'success' | 'error' | 'info' = 'info') => {
+      setPopup({ show: true, title, text, type });
   };
 
   const loadData = async () => {
@@ -97,13 +97,11 @@ export default function AutomationSettingsPage() {
         setTargetPass(settings.donor_password || '');
         if(settings.management_password) setDbMgmtPass(settings.management_password);
       }
-
       const { data: sysWh } = await supabase.from('warehouses').select('id, name, code').order('name');
       if (sysWh) setSystemWarehouses(sysWh);
 
       const { data: maps } = await supabase.from('warehouse_mappings').select('*').order('donor_wh_code');
       if (maps) setMappings(maps);
-
     } catch (error) {
       console.error("Error loading data", error);
     }
@@ -112,7 +110,7 @@ export default function AutomationSettingsPage() {
 
   const fetchServerLogs = async () => {
       try {
-          const res = await fetch(`${BOT_SERVER_URL}/api/logs`);
+          const res = await fetch(`${BOT_API_BASE}/logs`);
           const result = await res.json();
           if (result.success && result.logs) {
               setServerLogs(result.logs);
@@ -130,26 +128,19 @@ export default function AutomationSettingsPage() {
     setIsSaving(true);
     try {
       const payload = {
-        is_active: isActive,
-        fetch_time: `${fetchTime}:00`,
-        timezone: timezone,
-        is_previous_day_stock: isPrevDay,
-        donor_url: targetUrl,
-        donor_username: targetUser,
-        donor_password: targetPass,
-        management_password: dbMgmtPass,
+        is_active: isActive, fetch_time: `${fetchTime}:00`, timezone, is_previous_day_stock: isPrevDay,
+        donor_url: targetUrl, donor_username: targetUser, donor_password: targetPass, management_password: dbMgmtPass,
         updated_at: new Date().toISOString()
       };
 
-      if (settingsId) {
-        await supabase.from('automation_settings').update(payload).eq('id', settingsId);
-      } else {
+      if (settingsId) await supabase.from('automation_settings').update(payload).eq('id', settingsId);
+      else {
         const { data } = await supabase.from('automation_settings').insert([payload]).select().single();
         if (data) setSettingsId(data.id);
       }
-      showMessage("Automation settings updated successfully!", "success");
+      showAlert("Saved!", "Automation settings updated successfully.", "success");
     } catch (error: any) {
-      showMessage(`Failed to save settings: ${error.message}`, "error");
+      showAlert("Error", `Failed to save settings: ${error.message}`, "error");
     }
     setIsSaving(false);
   };
@@ -175,72 +166,63 @@ export default function AutomationSettingsPage() {
 
       try {
           let query = supabase.from('donor_warehouse_stock').delete().eq('stock_date', deleteDate);
+          if (deleteWhCode !== 'ALL') query = query.eq('warehouse_code', deleteWhCode);
           
-          if (deleteWhCode !== 'ALL') {
-              query = query.eq('warehouse_code', deleteWhCode);
-          }
-
           const { error } = await query;
           if (error) throw error;
           
-          showMessage(`Successfully deleted data for ${deleteDate} ${deleteWhCode !== 'ALL' ? `(WH: ${deleteWhCode})` : '(All Warehouses)'}.`, "success");
+          showAlert("Deleted Successfully!", `All data for ${deleteDate} ${deleteWhCode !== 'ALL' ? `(WH: ${deleteWhCode})` : '(All Warehouses)'} has been permanently deleted from the database.`, "success");
       } catch (error: any) {
-          showMessage(`Delete Failed: ${error.message}`, "error");
+          showAlert("Delete Failed", error.message, "error");
       }
       setIsDeleting(false);
   };
 
   const handleLiveTest = async () => {
-    if (!testWhCode) return showMessage("Please select a Donor Warehouse to test.", "error");
+    if (!testWhCode) return showAlert("Notice", "Please select a Donor Warehouse to test.", "info");
     setIsTesting(true);
     setTestData(null);
     setAutoRefreshLogs(true); 
-    showMessage(`Initializing Test for WH [${testWhCode}] via ${BOT_SERVER_URL}...`, "success");
 
     try {
-      const response = await fetch(`${BOT_SERVER_URL}/api/test-scrape?wh_code=${testWhCode}`);
+      const response = await fetch(`${BOT_API_BASE}/test-scrape?wh_code=${testWhCode}`);
       const result = await response.json();
       if (result.success) {
          setTestData(result.data);
-         showMessage(`Success! Fetched ${result.data.length} items from WH [${testWhCode}]`, "success");
+         showAlert("Test Complete", `Fetched ${result.data.length} items from WH [${testWhCode}] successfully!`, "success");
          setTimeout(() => window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }), 500);
       } else throw new Error(result.error);
     } catch (error: any) {
-      showMessage(`Test Failed: Connection refused. Server may be down.`, "error");
+      showAlert("Test Failed", "Could not connect to Bot Server. Check if the server is running and HTTPS Mixed Content proxy is active.", "error");
     } finally {
       setIsTesting(false);
     }
   };
 
   const handleManualSave = async () => {
-    if (!manualDate) return showMessage("Please select a date.", "error");
+    if (!manualDate) return showAlert("Notice", "Please select a target date.", "info");
     setIsManualFetching(true);
     setAutoRefreshLogs(true); 
-    showMessage(`Fetching and saving data for ALL mapped warehouses... Please wait.`, "success");
 
     try {
-      const response = await fetch(`${BOT_SERVER_URL}/api/manual-scrape`, {
+      const response = await fetch(`${BOT_API_BASE}/manual-scrape`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ date: manualDate })
       });
       const result = await response.json();
       if (result.success) {
-         showMessage(`✅ Success! Fetched and SAVED ${result.count} items for date: ${manualDate}`, "success");
+         showAlert("Fetch & Save Complete", `Successfully scraped and saved ${result.count} items for date: ${manualDate}`, "success");
       } else throw new Error(result.error);
     } catch (error: any) {
-      showMessage(`Fetch & Save Failed: Could not connect to Bot Server.`, "error");
+      showAlert("Process Failed", "Could not connect to Bot Server. Check server status.", "error");
     } finally {
       setIsManualFetching(false);
     }
   };
 
-  const addMapping = () => {
-      setMappings([...mappings, { id: `temp-${Date.now()}`, donor_wh_code: '', donor_wh_name: '', system_wh_id: '' }]);
-  };
-  const updateMapping = (id: string, field: string, value: string) => {
-      setMappings(mappings.map(m => m.id === id ? { ...m, [field]: value } : m));
-  };
+  const addMapping = () => setMappings([...mappings, { id: `temp-${Date.now()}`, donor_wh_code: '', donor_wh_name: '', system_wh_id: '' }]);
+  const updateMapping = (id: string, field: string, value: string) => setMappings(mappings.map(m => m.id === id ? { ...m, [field]: value } : m));
   const removeMapping = async (id: string) => {
       if (!id.startsWith('temp-')) await supabase.from('warehouse_mappings').delete().eq('id', id);
       setMappings(mappings.filter(m => m.id !== id));
@@ -253,17 +235,33 @@ export default function AutomationSettingsPage() {
               if (map.id && !map.id.toString().startsWith('temp-')) await supabase.from('warehouse_mappings').update(payload).eq('id', map.id);
               else await supabase.from('warehouse_mappings').insert([payload]);
           }
-          showMessage("Mappings saved successfully!", "success");
+          showAlert("Saved!", "Mappings updated successfully.", "success");
           loadData(); 
       } catch (error: any) {
-          showMessage(`Failed to save mappings: ${error.message}`, "error");
+          showAlert("Error", `Failed to save mappings: ${error.message}`, "error");
       }
   };
 
   return (
     <div className="flex flex-col min-h-screen bg-slate-50 w-full animate-in fade-in duration-500 relative">
 
-      {/* CREDENTIALS UNLOCK MODAL */}
+      {/* POPUP ALERT MODAL */}
+      {popup.show && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm px-4 animate-in fade-in duration-200">
+              <div className="bg-white p-6 rounded-3xl shadow-2xl w-full max-w-sm flex flex-col items-center text-center animate-in zoom-in-95">
+                  <div className={`w-16 h-16 rounded-full flex items-center justify-center mb-4 ${popup.type === 'success' ? 'bg-emerald-100 text-emerald-600' : popup.type === 'error' ? 'bg-rose-100 text-rose-600' : 'bg-indigo-100 text-indigo-600'}`}>
+                      <span className="text-3xl">{popup.type === 'success' ? '✅' : popup.type === 'error' ? '❌' : 'ℹ️'}</span>
+                  </div>
+                  <h3 className="font-black text-xl text-slate-900 mb-2">{popup.title}</h3>
+                  <p className="text-sm text-slate-600 mb-6 leading-relaxed">{popup.text}</p>
+                  <button onClick={() => setPopup({ ...popup, show: false })} className={`w-full py-3 text-white font-bold rounded-xl shadow-md transition-colors ${popup.type === 'success' ? 'bg-emerald-600 hover:bg-emerald-700' : popup.type === 'error' ? 'bg-rose-600 hover:bg-rose-700' : 'bg-indigo-600 hover:bg-indigo-700'}`}>
+                      Okay, got it!
+                  </button>
+              </div>
+          </div>
+      )}
+
+      {/* PASSWORD MODAL */}
       {showPassModal && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
               <div className="bg-white p-6 rounded-2xl shadow-2xl w-full max-w-sm animate-in zoom-in-95">
@@ -327,12 +325,6 @@ export default function AutomationSettingsPage() {
       </header>
 
       <div className="flex-1 overflow-y-auto p-4 md:p-6 custom-scrollbar">
-        {msg.text && (
-          <div className={`p-4 rounded-xl shadow-md border text-sm font-bold animate-in slide-in-from-top-2 flex justify-between items-center mb-6 w-full max-w-7xl mx-auto ${msg.type === 'error' ? 'bg-rose-50 text-rose-700 border-rose-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'}`}>
-            <span className="flex items-center"><span className="mr-2 text-lg">{msg.type === 'error' ? '⚠️' : '✅'}</span> {msg.text}</span>
-            <button onClick={() => setMsg({text:'', type:''})} className="p-1 rounded-md hover:bg-black/5"><Icons.Close /></button>
-          </div>
-        )}
 
         {isLoading ? (
           <div className="flex justify-center items-center h-64"><Icons.Spinner /></div>
@@ -601,7 +593,7 @@ export default function AutomationSettingsPage() {
 
             </div>
 
-            {/* --- NEW: TERMINAL LOGS SECTION --- */}
+            {/* --- TERMINAL LOGS SECTION --- */}
             <div className="bg-[#0f111a] rounded-2xl border border-slate-700 shadow-xl overflow-hidden mt-8">
                 <div className="p-3 border-b border-slate-800 bg-[#161a25] flex justify-between items-center">
                     <h4 className="text-xs font-black text-emerald-400 uppercase tracking-wider flex items-center">
@@ -639,7 +631,6 @@ export default function AutomationSettingsPage() {
                     <div ref={logsEndRef} />
                 </div>
             </div>
-            {/* ---------------------------------- */}
 
             {/* BOTTOM SECTION: Full Width Table for Test Results */}
             {testData && (
@@ -657,9 +648,7 @@ export default function AutomationSettingsPage() {
                                     <th className="p-3 text-[10px] font-black text-slate-600 uppercase border-r border-slate-200 text-center w-32">Donor WH Code</th>
                                     <th className="p-3 text-[10px] font-black text-slate-600 uppercase border-r border-slate-200 w-64">Product Name</th>
                                     <th className="p-3 text-[10px] font-black text-slate-600 uppercase border-r border-slate-200 text-center w-32">Product Code</th>
-                                    <th className="p-3 text-[10px] font-black text-slate-600 uppercase border-r border-slate-200 text-center w-20">Unit</th>
                                     <th className="p-3 text-[10px] font-black text-indigo-700 uppercase border-r border-slate-200 text-center bg-indigo-50/50 w-32">Regular Qty</th>
-                                    <th className="p-3 text-[10px] font-black text-amber-700 uppercase text-center bg-amber-50/50 w-32">Contingency Qty</th>
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-100">
@@ -669,9 +658,7 @@ export default function AutomationSettingsPage() {
                                         <td className="p-3 border-r border-slate-100 text-center"><span className="text-[10px] font-mono font-bold px-2 py-0.5 bg-slate-100 rounded text-slate-600">{d.donor_warehouse_code}</span></td>
                                         <td className="p-3 border-r border-slate-100"><p className="font-bold text-slate-900 text-sm line-clamp-2">{d.product_name}</p></td>
                                         <td className="p-3 border-r border-slate-100 text-center"><p className="text-xs font-mono font-bold text-slate-600">{d.product_code}</p></td>
-                                        <td className="p-3 border-r border-slate-100 text-center"><p className="text-[10px] font-bold text-slate-500 uppercase">{d.unit}</p></td>
                                         <td className="p-3 border-r border-slate-100 text-center bg-indigo-50/10"><span className="text-base font-black text-indigo-700">{d.quantity}</span></td>
-                                        <td className="p-3 text-center bg-amber-50/10"><span className="text-base font-black text-amber-700">{d.contingency_quantity}</span></td>
                                     </tr>
                                 ))}
                             </tbody>
