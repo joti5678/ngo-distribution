@@ -4,6 +4,9 @@ const cors = require('cors');
 const { chromium } = require('playwright');
 const { createClient } = require('@supabase/supabase-js');
 const cron = require('node-cron');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 
 const app = express();
 app.use(cors());
@@ -11,11 +14,31 @@ app.use(express.json());
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
 
-// ব্রাউজার অপটিমাইজেশন (সার্ভারের জন্য)
 const browserOptions = { 
-    headless: true, // সার্ভারে অবশ্যই true থাকতে হবে
+    headless: true, 
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] 
 };
+
+// ==========================================
+// লাইভ লগ দেখার API (PM2 এর লগ ফাইল রিড করবে)
+// ==========================================
+app.get('/api/logs', (req, res) => {
+    try {
+        // PM2 এর ডিফল্ট লগ ফাইলের পাথ
+        const logPath = path.join(os.homedir(), '.pm2', 'logs', 'donor-bot-out.log');
+        
+        if (fs.existsSync(logPath)) {
+            const content = fs.readFileSync(logPath, 'utf8');
+            // শেষের ২০০ লাইন কেটে ফ্রন্টএন্ডে পাঠানো হচ্ছে
+            const lines = content.trim().split('\n').slice(-200); 
+            res.json({ success: true, logs: lines });
+        } else {
+            res.json({ success: true, logs: ["Log file not found yet. Start an action to generate logs."] });
+        }
+    } catch(e) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
 
 // ==========================================
 // কোর স্ক্র্যাপিং ফাংশন (সেভ করার জন্য)
@@ -139,6 +162,7 @@ async function performScraping(targetDate) {
             throw new Error("No data extracted from the donor site.");
         }
     } catch (error) {
+        console.log(`❌ Error: ${error.message}`);
         if(browser) await browser.close();
         throw error;
     }
@@ -169,6 +193,7 @@ app.get('/api/test-scrape', async (req, res) => {
         const targetMap = mappings ? mappings.find(m => m.donor_wh_code === targetWhCode) : null;
         const whName = targetMap ? targetMap.donor_wh_name : targetWhCode;
 
+        console.log(`\n🧪 Testing Fetch for WH: ${targetWhCode}`);
         browser = await chromium.launch(browserOptions); 
         const context = await browser.newContext();
         const page = await context.newPage();
@@ -250,8 +275,10 @@ app.get('/api/test-scrape', async (req, res) => {
         }
 
         await browser.close();
+        console.log(`✅ Test Fetch Done! (${allExtractedData.length} records)`);
         res.json({ success: true, data: allExtractedData });
     } catch (error) {
+        console.log(`❌ Test Error: ${error.message}`);
         if(browser) await browser.close();
         res.status(500).json({ success: false, error: error.message });
     }

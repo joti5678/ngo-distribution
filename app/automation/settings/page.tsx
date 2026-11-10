@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Icons } from '../../components/Icons'; 
 import { createClient } from '@supabase/supabase-js';
 
@@ -10,22 +10,7 @@ const supabase = createClient(
 );
 
 // 👇 এখানে আপনার Google Cloud সার্ভারের External IP টি দিন 👇
-// উদাহরণ: const BOT_SERVER_URL = 'http://34.123.45.67:4000';
 const BOT_SERVER_URL = 'http://136.87.183.229:4000'; 
-
-const DONOR_WAREHOUSES = [
-    { code: "117", name: "Acted WH _ RC, Kutupalong" },
-    { code: "118", name: "Acted WH _ Camp 1E, Kutupalong" },
-    { code: "119", name: "Acted WH _ Camp 2W, Kutupalong" },
-    { code: "120", name: "Acted WH _ Camp 4 (Boroitoli), Kutupalong" },
-    { code: "121", name: "Acted WH _ Camp 4 (Ex LPG_DP), Kutupalong" },
-    { code: "122", name: "Acted WH _ 4 Ext, Kutupalong" },
-    { code: "123", name: "Acted WH _ Camp 17, Kutupalong" },
-    { code: "134", name: "Acted LPG WH _ Camp 7, Kutupalong" },
-    { code: "135", name: "Acted LPG WH _ Camp 1 E, Kutupalong" },
-    { code: "136", name: "Acted LPG WH _ Camp 2 W, Kutupalong" },
-    { code: "137", name: "Acted LPG WH _ Camp 4 Ext, Kutupalong" }
-];
 
 export default function AutomationSettingsPage() {
   const [isLoading, setIsLoading] = useState(true);
@@ -57,6 +42,11 @@ export default function AutomationSettingsPage() {
   const [manualDate, setManualDate] = useState('');
   const [testData, setTestData] = useState<any[] | null>(null);
 
+  // Terminal Logs State
+  const [serverLogs, setServerLogs] = useState<string[]>([]);
+  const [autoRefreshLogs, setAutoRefreshLogs] = useState(false);
+  const logsEndRef = useRef<HTMLDivElement>(null);
+
   // Mappings State
   const [mappings, setMappings] = useState<any[]>([]);
   const [systemWarehouses, setSystemWarehouses] = useState<any[]>([]);
@@ -68,7 +58,17 @@ export default function AutomationSettingsPage() {
     const dateStr = new Date(today.getTime() - (today.getTimezoneOffset() * 60000)).toISOString().split('T')[0];
     setManualDate(dateStr); 
     loadData();
+    fetchServerLogs();
   }, []);
+
+  // Polling for live logs
+  useEffect(() => {
+      let interval: NodeJS.Timeout;
+      if (autoRefreshLogs) {
+          interval = setInterval(() => fetchServerLogs(), 3000);
+      }
+      return () => clearInterval(interval);
+  }, [autoRefreshLogs]);
 
   const showMessage = (text: string, type: 'success' | 'error' = 'success') => {
     setMsg({ text, type });
@@ -101,6 +101,22 @@ export default function AutomationSettingsPage() {
       console.error("Error loading data", error);
     }
     setIsLoading(false);
+  };
+
+  const fetchServerLogs = async () => {
+      try {
+          const res = await fetch(`${BOT_SERVER_URL}/api/logs`);
+          const result = await res.json();
+          if (result.success && result.logs) {
+              setServerLogs(result.logs);
+              // Scroll terminal to bottom
+              if (logsEndRef.current) {
+                  logsEndRef.current.scrollIntoView({ behavior: "smooth" });
+              }
+          }
+      } catch (err) {
+          console.error("Failed to fetch logs");
+      }
   };
 
   const handleSaveSettings = async (e: React.FormEvent) => {
@@ -146,6 +162,7 @@ export default function AutomationSettingsPage() {
     if (!testWhCode) return showMessage("Please select a Donor Warehouse to test.", "error");
     setIsTesting(true);
     setTestData(null);
+    setAutoRefreshLogs(true); // Start showing logs automatically
     showMessage(`Initializing Test for WH [${testWhCode}] via ${BOT_SERVER_URL}...`, "success");
 
     try {
@@ -157,7 +174,7 @@ export default function AutomationSettingsPage() {
          setTimeout(() => window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }), 500);
       } else throw new Error(result.error);
     } catch (error: any) {
-      showMessage(`Test Failed: Connection refused. Please ensure your Cloud Server is running and port 4000 is open in firewall.`, "error");
+      showMessage(`Test Failed: Connection refused. Server may be down.`, "error");
     } finally {
       setIsTesting(false);
     }
@@ -166,6 +183,7 @@ export default function AutomationSettingsPage() {
   const handleManualSave = async () => {
     if (!manualDate) return showMessage("Please select a date.", "error");
     setIsManualFetching(true);
+    setAutoRefreshLogs(true); // Show live process
     showMessage(`Fetching and saving data for ALL mapped warehouses... Please wait.`, "success");
 
     try {
@@ -387,7 +405,6 @@ export default function AutomationSettingsPage() {
                                 )}
                             </div>
                             <div className="p-5 space-y-4 relative">
-                                {/* Obscure layer if locked */}
                                 {!isCredentialsUnlocked && (
                                     <div className="absolute inset-0 bg-white/60 backdrop-blur-[2px] z-10 flex items-center justify-center">
                                         <div className="bg-white px-4 py-2 rounded-full shadow-sm border border-slate-200 flex items-center text-xs font-bold text-slate-500">
@@ -482,6 +499,46 @@ export default function AutomationSettingsPage() {
                 </div>
 
             </div>
+
+            {/* --- NEW: TERMINAL LOGS SECTION --- */}
+            <div className="bg-[#0f111a] rounded-2xl border border-slate-700 shadow-xl overflow-hidden mt-8">
+                <div className="p-3 border-b border-slate-800 bg-[#161a25] flex justify-between items-center">
+                    <h4 className="text-xs font-black text-emerald-400 uppercase tracking-wider flex items-center">
+                        <span className="mr-2 text-base">💻</span> Server Terminal Logs
+                    </h4>
+                    <div className="flex items-center gap-4">
+                        <label className="flex items-center cursor-pointer">
+                            <span className="text-[10px] text-slate-400 font-bold mr-2 uppercase">Auto Refresh (3s)</span>
+                            <div className="relative">
+                                <input type="checkbox" className="sr-only" checked={autoRefreshLogs} onChange={() => setAutoRefreshLogs(!autoRefreshLogs)} />
+                                <div className={`block w-8 h-4 rounded-full transition-colors ${autoRefreshLogs ? 'bg-emerald-500' : 'bg-slate-600'}`}></div>
+                                <div className={`dot absolute left-1 top-1 bg-white w-2 h-2 rounded-full transition-transform ${autoRefreshLogs ? 'transform translate-x-4' : ''}`}></div>
+                            </div>
+                        </label>
+                        <button onClick={fetchServerLogs} className="px-3 py-1 bg-slate-700 hover:bg-slate-600 text-white text-[10px] font-bold rounded-lg transition-colors flex items-center gap-1">
+                            <span>↻</span> Refresh
+                        </button>
+                    </div>
+                </div>
+                <div className="p-4 h-64 overflow-y-auto font-mono text-[11px] md:text-xs text-slate-300 leading-relaxed custom-scrollbar flex flex-col">
+                    {serverLogs.length === 0 ? (
+                        <span className="text-slate-500">Waiting for server logs... (Start an action or refresh)</span> 
+                    ) : (
+                        serverLogs.map((log, i) => {
+                            // Simple syntax coloring for logs
+                            let colorClass = "text-slate-300";
+                            if (log.includes("Error") || log.includes("❌") || log.includes("Failed")) colorClass = "text-rose-400";
+                            else if (log.includes("Success") || log.includes("✅") || log.includes("Done")) colorClass = "text-emerald-400";
+                            else if (log.includes("⚠️")) colorClass = "text-amber-400";
+                            else if (log.includes("▶️") || log.includes("Processing")) colorClass = "text-cyan-400";
+                            
+                            return <div key={i} className={`whitespace-pre-wrap ${colorClass}`}>{log}</div>
+                        })
+                    )}
+                    <div ref={logsEndRef} />
+                </div>
+            </div>
+            {/* ---------------------------------- */}
 
             {/* BOTTOM SECTION: Full Width Table for Test Results */}
             {testData && (
