@@ -11,6 +11,14 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
 );
 
+// ডেট ফরম্যাট করার জন্য হেল্পার ফাংশন (যাতে টাইমজোনের কারণে তারিখ পরিবর্তন না হয়)
+const formatDisplayDate = (dateString: string) => {
+  if (!dateString) return '';
+  const datePart = dateString.split('T')[0]; 
+  const [year, month, day] = datePart.split('-');
+  return `${day}/${month}/${year}`;
+};
+
 export default function BulkEntryPage() {
   const [warehouses, setWarehouses] = useState<any[]>([]);
   const [products, setProducts] = useState<any[]>([]);
@@ -36,6 +44,12 @@ export default function BulkEntryPage() {
   // Filters for Table
   const [searchTable, setSearchTable] = useState('');
   const [historyWhFilter, setHistoryWhFilter] = useState('ALL');
+  const [historyDateFilter, setHistoryDateFilter] = useState('');
+
+  // Pagination States
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageChunk, setPageChunk] = useState(0); 
+  const itemsPerPage = 5;
 
   // Modals
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
@@ -65,6 +79,12 @@ export default function BulkEntryPage() {
     fetchInitialData();
   }, []);
 
+  // Reset pagination when filters change
+  useEffect(() => {
+    setCurrentPage(1);
+    setPageChunk(0);
+  }, [searchTable, historyWhFilter, historyDateFilter]);
+
   const fetchInitialData = async () => {
     setIsLoading(true);
     
@@ -72,7 +92,6 @@ export default function BulkEntryPage() {
         const { data: { user } } = await supabase.auth.getUser();
         if (user) setCurrentUser(user);
 
-        // Fetch Data from Global Session securely
         const sessionStr = localStorage.getItem('user_session');
         const sessionUser = sessionStr ? JSON.parse(sessionStr) : null;
         
@@ -85,7 +104,6 @@ export default function BulkEntryPage() {
         const dbRoleName = String(profile?.user_roles?.role_name || profile?.role || sessionUser?.role || '').toUpperCase();
         const isSuperAdmin = dbRoleName.includes('SUPER ADMIN') || dbRoleName === 'ADMIN' || dbRoleName.includes('WEB ADMIN');
 
-        // Extract Wh Ids from Session
         const sessionWhIds = sessionUser?.assigned_wh_ids || [];
 
         const [whRes, prodRes, partRes] = await Promise.all([
@@ -97,7 +115,6 @@ export default function BulkEntryPage() {
         if (prodRes.data) setProducts(prodRes.data);
         if (partRes.data) setPartners(partRes.data);
 
-        // Filter Warehouses based on Session Mappings
         const allWhs = whRes.data || [];
         const myWhs = isSuperAdmin ? allWhs : allWhs.filter(w => sessionWhIds.includes(w.id));
         setWarehouses(myWhs);
@@ -123,13 +140,13 @@ export default function BulkEntryPage() {
       .is('transfer_id', null) 
       .not('remarks', 'ilike', '%Transfer%') 
       .order('created_at', { ascending: false })
-      .limit(100);
+      .limit(500); 
 
       if (!isSuperAdmin) {
         if (assignedIds.length > 0) {
             tQuery = tQuery.in('warehouse_id', assignedIds);
         } else {
-            tQuery = tQuery.eq('id', '00000000-0000-0000-0000-000000000000'); // Force empty
+            tQuery = tQuery.eq('id', '00000000-0000-0000-0000-000000000000'); 
         }
       }
 
@@ -162,6 +179,7 @@ export default function BulkEntryPage() {
     } catch(err) { }
   };
 
+  // 🚀 BULK ENTRY LOGIC (Only Date passed to Database)
   const handleStockEntry = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!bulkWarehouseId || bagItems.length === 0) {
@@ -194,10 +212,7 @@ export default function BulkEntryPage() {
             .insert([{ warehouse_id: bulkWarehouseId, product_id: item.product_id, quantity: item.qty }]);
         }
 
-        const entryDateTime = new Date(entryDate);
-        const now = new Date();
-        entryDateTime.setHours(now.getHours(), now.getMinutes(), now.getSeconds());
-
+        // টাইম রিমুভ করে শুধু ডেট পাঠানো হচ্ছে
         await supabase.from('inventory_transactions').insert([{
           warehouse_id: bulkWarehouseId,
           product_id: item.product_id,
@@ -208,7 +223,7 @@ export default function BulkEntryPage() {
           remarks: bulkRemarks || `Received via ${sourceName}`,
           created_by: currentUser?.id || null,
           created_by_email: currentUser?.email || null,
-          created_at: entryDateTime.toISOString() 
+          created_at: entryDate // ONLY DATE
         }]);
       }
 
@@ -283,7 +298,6 @@ export default function BulkEntryPage() {
   };
 
   const confirmExcelImport = () => {
-    // Add valid items to Entry Bag
     const newBag = [...bagItems];
     excelPreviewData.forEach(excelItem => {
         const existingIndex = newBag.findIndex(b => b.product_id === excelItem.product_id);
@@ -317,7 +331,15 @@ export default function BulkEntryPage() {
       } else if (qtyDiff > 0) {
          await supabase.from('inventory').insert([{ warehouse_id: editingTxn.warehouse_id, product_id: editingTxn.product_id, quantity: qtyDiff }]);
       }
-      await supabase.from('inventory_transactions').update({ quantity: newQty, updated_by: currentUser?.id || null, updated_by_email: currentUser?.email || null, updated_at: new Date().toISOString() }).eq('id', editingTxn.id);
+      
+      // Update with current user details but retain the original date
+      await supabase.from('inventory_transactions').update({ 
+        quantity: newQty, 
+        updated_by: currentUser?.id || null, 
+        updated_by_email: currentUser?.email || null, 
+        updated_at: new Date().toISOString() 
+      }).eq('id', editingTxn.id);
+      
       showMessage("Transaction updated.", "success");
       const sessionStr = localStorage.getItem('user_session');
       const sessionUser = sessionStr ? JSON.parse(sessionStr) : null;
@@ -348,7 +370,6 @@ export default function BulkEntryPage() {
     } catch (error) { showMessage("Failed to revert.", "error"); } finally { setIsSavingEdit(false); }
   };
 
-  // Helper function to prevent scroll on number inputs
   const preventScroll = (e: React.WheelEvent<HTMLInputElement>) => {
     (e.target as HTMLInputElement).blur();
   };
@@ -360,20 +381,64 @@ export default function BulkEntryPage() {
     const query = searchTable.toLowerCase();
     const txnId = `txn-${t.id.split('-')[0]}`.toLowerCase();
     
+    // Product code added in search match
     const searchMatch = txnId.includes(query) || 
            (t.reference_no || '').toLowerCase().includes(query) || 
            (t.products?.name || '').toLowerCase().includes(query) || 
+           (t.products?.code || '').toLowerCase().includes(query) || 
            (t.warehouses?.name || '').toLowerCase().includes(query);
 
-    const filterMatch = historyWhFilter === 'ALL' || t.warehouse_id === historyWhFilter;
+    const filterWhMatch = historyWhFilter === 'ALL' || t.warehouse_id === historyWhFilter;
+    
+    const tDateStr = t.created_at.split('T')[0];
+    const filterDateMatch = !historyDateFilter || tDateStr === historyDateFilter;
 
-    return searchMatch && filterMatch;
+    return searchMatch && filterWhMatch && filterDateMatch;
   });
+
+  // --- PAGINATION LOGIC ---
+  const totalPages = Math.ceil(filteredTransactions.length / itemsPerPage);
+  const currentChunkStartPage = pageChunk * 5 + 1;
+  const currentChunkEndPage = Math.min(currentChunkStartPage + 4, totalPages);
+  
+  const displayedPages = [];
+  for (let i = currentChunkStartPage; i <= currentChunkEndPage; i++) {
+    displayedPages.push(i);
+  }
+
+  const paginatedTransactions = filteredTransactions.slice(
+    (currentPage - 1) * itemsPerPage,
+    currentPage * itemsPerPage
+  );
+
+  const handleNextPage = () => {
+    if (currentPage < totalPages) {
+        const nextPage = currentPage + 1;
+        setCurrentPage(nextPage);
+        if (nextPage > currentChunkEndPage) setPageChunk(pageChunk + 1);
+    }
+  };
+
+  const handlePrevPage = () => {
+    if (currentPage > 1) {
+        const prevPage = currentPage - 1;
+        setCurrentPage(prevPage);
+        if (prevPage < currentChunkStartPage) setPageChunk(pageChunk - 1);
+    }
+  };
+
+  const handleLoadMoreChunk = () => {
+      if (currentChunkEndPage < totalPages) {
+          setPageChunk(pageChunk + 1);
+          setCurrentPage(currentChunkEndPage + 1);
+      }
+  };
+
 
   // EXCEL & PDF EXPORT
   const handleExportExcel = () => {
     const exportData = filteredTransactions.map(t => ({
-      "Date": new Date(t.created_at).toLocaleDateString(),
+      "Date": formatDisplayDate(t.created_at),
       "System TXN ID": `TXN-${t.id.split('-')[0].toUpperCase()}`,
       "Target Warehouse": t.warehouses?.name || 'Unknown',
       "Product Name": t.products?.name || 'Unknown',
@@ -392,7 +457,7 @@ export default function BulkEntryPage() {
     doc.setFontSize(14); doc.text("Bulk Stock Entry - History", 14, 15);
     const tableColumn = ["Date & TXN", "Warehouse", "Product", "Qty (IN)", "Status"];
     const tableRows = filteredTransactions.map(t => [
-      `${new Date(t.created_at).toLocaleDateString()}
+      `${formatDisplayDate(t.created_at)}
 TXN-${t.id.split('-')[0].toUpperCase()}`,
       t.warehouses?.name || 'Unknown',
       t.products?.name || 'Unknown',
@@ -410,7 +475,6 @@ TXN-${t.id.split('-')[0].toUpperCase()}`,
   return (
     <div className="flex flex-col h-full bg-slate-50 w-full animate-in fade-in duration-500 relative">
       
-      {/* Global style to hide number input arrows (spinners) */}
       <style dangerouslySetInnerHTML={{__html: `
         input[type="number"]::-webkit-inner-spin-button,
         input[type="number"]::-webkit-outer-spin-button {
@@ -433,7 +497,6 @@ TXN-${t.id.split('-')[0].toUpperCase()}`,
             </div>
         </div>
         
-        {/* Excel Upload Buttons */}
         <div className="flex space-x-2">
             <button onClick={downloadDemoExcel} className="hidden sm:flex bg-white border border-slate-300 text-slate-600 hover:bg-slate-50 font-bold py-2 px-3 rounded-lg text-xs shadow-sm items-center transition-colors">
                 <Icons.Download /> <span className="ml-1">Demo Format</span>
@@ -447,7 +510,6 @@ TXN-${t.id.split('-')[0].toUpperCase()}`,
 
       <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 custom-scrollbar">
         
-        {/* Toast Message */}
         {msg.text && (
           <div className={`p-4 rounded-xl shadow-md border text-sm font-bold animate-in slide-in-from-top-2 flex justify-between items-center shrink-0 fixed top-24 left-1/2 -translate-x-1/2 z-50 w-[90%] max-w-md ${msg.type === 'error' ? 'bg-rose-50 text-rose-700 border-rose-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'}`}>
             <span className="flex items-center"><span className="mr-2 text-lg">{msg.type === 'error' ? '⚠️' : '✅'}</span> {msg.text}</span>
@@ -497,10 +559,10 @@ TXN-${t.id.split('-')[0].toUpperCase()}`,
         </div>
 
         {/* 2-Column Builder */}
-        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col md:flex-row h-[560px] overflow-hidden">
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col md:flex-row min-h-[500px] overflow-hidden">
           
           {/* Left: Products */}
-          <div className="w-full md:w-1/2 flex flex-col border-b md:border-b-0 md:border-r border-slate-200 bg-slate-50/50 h-1/2 md:h-full">
+          <div className="w-full md:w-1/2 flex flex-col border-b md:border-b-0 md:border-r border-slate-200 bg-slate-50/50 min-h-[350px]">
             <div className="p-4 border-b border-slate-200 bg-white shrink-0">
                <h4 className="font-bold text-slate-800 text-xs uppercase tracking-wide mb-3">Available Products</h4>
                <input 
@@ -511,7 +573,7 @@ TXN-${t.id.split('-')[0].toUpperCase()}`,
                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-bold text-slate-900 outline-none focus:border-emerald-500"
                />
             </div>
-            <div className="flex-1 overflow-y-auto p-3 space-y-2 custom-scrollbar">
+            <div className="flex-1 overflow-y-auto p-3 space-y-2 max-h-[400px] md:max-h-none custom-scrollbar">
                {filteredProducts.map(product => (
                  <div key={product.id} draggable onDragStart={(e) => handleDragStart(e, product)} className="flex items-center justify-between p-3 border border-slate-200 rounded-xl bg-white shadow-sm cursor-grab active:cursor-grabbing hover:border-emerald-300 transition-colors">
                    <div className="flex items-center space-x-2 truncate pr-2">
@@ -532,7 +594,7 @@ TXN-${t.id.split('-')[0].toUpperCase()}`,
           </div>
 
           {/* Right: Entry Bag + Bottom Fields */}
-          <div className="w-full md:w-1/2 flex flex-col bg-white h-1/2 md:h-full" onDragOver={(e) => e.preventDefault()} onDrop={handleDrop}>
+          <div className="w-full md:w-1/2 flex flex-col bg-white min-h-[400px]" onDragOver={(e) => e.preventDefault()} onDrop={handleDrop}>
             <div className="p-4 border-b border-emerald-100 bg-emerald-50 shrink-0 flex justify-between items-center">
                <h4 className="font-bold text-emerald-900 text-xs uppercase tracking-wide flex items-center">
                  <span className="mr-2 text-base">📥</span> Entry Bag
@@ -540,7 +602,7 @@ TXN-${t.id.split('-')[0].toUpperCase()}`,
                <span className="bg-emerald-600 text-white text-[10px] font-bold px-2 py-1 rounded-full">{bagItems.length} Added</span>
             </div>
             
-            <div className="flex-1 overflow-y-auto p-3 space-y-3 custom-scrollbar relative">
+            <div className="flex-1 overflow-y-auto p-3 space-y-3 max-h-[400px] md:max-h-none custom-scrollbar relative">
                {bagItems.length === 0 ? (
                  <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400 text-center p-4">
                    <span className="text-4xl mb-3 opacity-50">📦</span>
@@ -576,7 +638,7 @@ TXN-${t.id.split('-')[0].toUpperCase()}`,
             </div>
 
             {/* Bottom Section */}
-            <div className="p-4 border-t border-slate-200 bg-slate-50 shrink-0 space-y-3">
+            <div className="p-4 border-t border-slate-200 bg-slate-50 shrink-0 space-y-3 mt-auto">
                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                  <div>
                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wide mb-1">Remarks / Details</label>
@@ -600,6 +662,17 @@ TXN-${t.id.split('-')[0].toUpperCase()}`,
               <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wide">Recent Bulk Entries</h3>
               <div className="flex flex-col sm:flex-row items-center space-y-3 sm:space-y-0 sm:space-x-3 w-full lg:w-auto">
                  
+                 {/* New Date Filter */}
+                 <div className="w-full sm:w-auto">
+                   <input 
+                     type="date" 
+                     value={historyDateFilter} 
+                     onChange={(e) => setHistoryDateFilter(e.target.value)}
+                     className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-900 outline-none focus:border-emerald-500" 
+                     title="Filter by Entry Date"
+                   />
+                 </div>
+
                  <div className="w-full sm:w-auto">
                    <select value={historyWhFilter} onChange={(e) => setHistoryWhFilter(e.target.value)} className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-900 outline-none focus:border-emerald-500">
                      <option value="ALL">All My Warehouses</option>
@@ -609,7 +682,7 @@ TXN-${t.id.split('-')[0].toUpperCase()}`,
 
                  <div className="relative w-full sm:w-64">
                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"><Icons.Search /></div>
-                   <input type="text" placeholder="Search TXN, Product, WH..." value={searchTable} onChange={(e) => setSearchTable(e.target.value)} className="w-full pl-10 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-900 outline-none focus:border-emerald-500" />
+                   <input type="text" placeholder="Search TXN, Product, Code..." value={searchTable} onChange={(e) => setSearchTable(e.target.value)} className="w-full pl-10 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-900 outline-none focus:border-emerald-500" />
                  </div>
                  
                  <div className="flex space-x-2 shrink-0">
@@ -638,16 +711,16 @@ TXN-${t.id.split('-')[0].toUpperCase()}`,
                 <tbody className="divide-y divide-slate-100">
                   {isLoading ? (
                     <tr><td colSpan={6} className="p-10 text-center"><Icons.Spinner /></td></tr>
-                  ) : filteredTransactions.length === 0 ? (
+                  ) : paginatedTransactions.length === 0 ? (
                     <tr><td colSpan={6} className="p-10 text-center text-sm text-slate-500 font-medium">No recent bulk entries found.</td></tr>
                   ) : (
-                    filteredTransactions.map((t) => {
+                    paginatedTransactions.map((t) => {
                       const txnId = `TXN-${t.id.split('-')[0].toUpperCase()}`;
                       
                       return (
                         <tr key={t.id} className="hover:bg-slate-50 group transition-colors">
                           <td className="px-4 py-3 align-top">
-                            <p className="font-bold text-slate-900 text-sm">{new Date(t.created_at).toLocaleDateString()}</p>
+                            <p className="font-bold text-slate-900 text-sm">{formatDisplayDate(t.created_at)}</p>
                             <p className="text-[10px] text-emerald-600 font-mono mt-0.5 font-bold">{txnId}</p>
                             {t.reference_no && <p className="text-[9px] text-slate-400 mt-0.5">Ref: {t.reference_no}</p>}
                           </td>
@@ -698,6 +771,50 @@ TXN-${t.id.split('-')[0].toUpperCase()}`,
                 </tbody>
              </table>
            </div>
+
+           {/* --- PAGINATION CONTROLS --- */}
+           {totalPages > 1 && (
+             <div className="p-4 border-t border-slate-100 bg-slate-50 flex items-center justify-between">
+                <p className="text-xs text-slate-500 font-medium">
+                  Showing <span className="font-bold text-slate-900">{(currentPage - 1) * itemsPerPage + 1}</span> to <span className="font-bold text-slate-900">{Math.min(currentPage * itemsPerPage, filteredTransactions.length)}</span> of <span className="font-bold text-slate-900">{filteredTransactions.length}</span> entries
+                </p>
+                
+                <div className="flex items-center space-x-1">
+                  <button 
+                    onClick={handlePrevPage} 
+                    disabled={currentPage === 1}
+                    className="px-3 py-1.5 border border-slate-200 bg-white rounded-lg text-xs font-bold text-slate-600 disabled:opacity-50 hover:bg-slate-100 transition-colors"
+                  >
+                    Prev
+                  </button>
+                  
+                  {displayedPages.map(page => (
+                    <button 
+                      key={page} 
+                      onClick={() => setCurrentPage(page)}
+                      className={`w-8 h-8 rounded-lg text-xs font-bold transition-colors ${currentPage === page ? 'bg-emerald-600 text-white shadow-sm' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'}`}
+                    >
+                      {page}
+                    </button>
+                  ))}
+
+                  {currentChunkEndPage < totalPages && (
+                    <button onClick={handleLoadMoreChunk} className="px-3 py-1.5 bg-indigo-50 text-indigo-600 text-xs font-bold rounded-lg hover:bg-indigo-100 transition-colors ml-1">
+                      See More...
+                    </button>
+                  )}
+
+                  <button 
+                    onClick={handleNextPage} 
+                    disabled={currentPage === totalPages}
+                    className="px-3 py-1.5 border border-slate-200 bg-white rounded-lg text-xs font-bold text-slate-600 disabled:opacity-50 hover:bg-slate-100 transition-colors ml-1"
+                  >
+                    Next
+                  </button>
+                </div>
+             </div>
+           )}
+
         </div>
       </div>
 

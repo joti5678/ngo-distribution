@@ -12,6 +12,14 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
 );
 
+// ডেট ফরম্যাট করার হেল্পার ফাংশন (টাইমজোন শিফট রোধ করার জন্য)
+const formatDisplayDate = (dateString: string) => {
+  if (!dateString) return '';
+  const datePart = dateString.split('T')[0]; 
+  const [year, month, day] = datePart.split('-');
+  return `${day}/${month}/${year}`;
+};
+
 const MANIFEST_COLORS = [
   { bg: 'bg-blue-50', border: 'border-blue-200', text: 'text-blue-900', numBg: 'bg-blue-200/50', active: 'bg-blue-500' },
   { bg: 'bg-emerald-50', border: 'border-emerald-200', text: 'text-emerald-900', numBg: 'bg-emerald-200/50', active: 'bg-emerald-500' },
@@ -163,7 +171,6 @@ export default function DailyDistributionReportPage() {
       const initInputs: Record<string, { qty: number | '', hh: number | '' }> = {};
       (mItems || []).forEach((item: any) => { initInputs[`${item.manifest_id}_${item.product_id}`] = { qty: '', hh: '' }; });
       
-      // Preserve existing inputs if any during load more
       setInputs(prev => ({ ...initInputs, ...prev }));
 
       const { data: invData } = await supabase.from('inventory').select('warehouse_id, product_id, quantity');
@@ -264,14 +271,16 @@ export default function DailyDistributionReportPage() {
 
     setIsSubmitting(true);
     try {
-      const entryDateTime = new Date(distDate);
-      entryDateTime.setHours(new Date().getHours(), new Date().getMinutes(), new Date().getSeconds());
-
       for (const dpId of dpIdsToSubmit) {
+        // Here created_at will default to now(), but distribution_date correctly stores the selected date
         const { data: distHeader, error: distErr } = await supabase.from('distributions').insert([{
-          distribution_point_id: dpId, distribution_date: distDate, remarks: remarks || null,
-          created_by: currentUser?.id || null, created_by_email: currentUser?.email || null
+          distribution_point_id: dpId, 
+          distribution_date: distDate, 
+          remarks: remarks || null,
+          created_by: currentUser?.id || null, 
+          created_by_email: currentUser?.email || null
         }]).select().single();
+        
         if (distErr) throw distErr;
         
         const distRefCode = `DIST-${distHeader.id.split('-')[0].toUpperCase()}`;
@@ -289,11 +298,20 @@ export default function DailyDistributionReportPage() {
                 const { data: invFind } = await supabase.from('inventory').select('id, warehouse_id, quantity').in('warehouse_id', connectedWhIds).eq('product_id', item.product_id).order('quantity', { ascending: false }).limit(1);
                 const targetWh = (invFind && invFind.length > 0) ? invFind[0] : null;
                 if (!targetWh) throw new Error(`Stock missing for ${item.products?.name}`);
+                
                 await supabase.from('inventory').update({ quantity: Math.max(0, targetWh.quantity - distQty), last_updated: new Date().toISOString() }).eq('id', targetWh.id);
+                
+                // 🚀 FIXED: Only passing selected 'distDate' as 'created_at' without current time
                 await supabase.from('inventory_transactions').insert([{
-                  warehouse_id: targetWh.warehouse_id, product_id: item.product_id, transaction_type: 'OUT',
-                  quantity: distQty, reference_no: distRefCode, remarks: `Distributed at ${payload.manifest.dp?.name}`,
-                  created_by: currentUser?.id, created_by_email: currentUser?.email, created_at: entryDateTime.toISOString()
+                  warehouse_id: targetWh.warehouse_id, 
+                  product_id: item.product_id, 
+                  transaction_type: 'OUT',
+                  quantity: distQty, 
+                  reference_no: distRefCode, 
+                  remarks: `Distributed at ${payload.manifest.dp?.name}`,
+                  created_by: currentUser?.id, 
+                  created_by_email: currentUser?.email, 
+                  created_at: distDate // 👈 No time component used here
                 }]);
             }
           }
@@ -349,11 +367,13 @@ export default function DailyDistributionReportPage() {
         if (diffQty !== 0) {
           const { data: mItem } = await supabase.from('manifest_items').select('id, distributed_qty').eq('manifest_id', item.manifest_id).eq('product_id', item.product_id).single();
           if (mItem) await supabase.from('manifest_items').update({ distributed_qty: Math.max(0, (Number(mItem.distributed_qty) || 0) + diffQty) }).eq('id', mItem.id);
+          
           if (!item.products?.is_open_stock) {
               const { data: invFind } = await supabase.from('inventory').select('id, warehouse_id, quantity').in('warehouse_id', connectedWhIds).eq('product_id', item.product_id).order('quantity', { ascending: false }).limit(1);
               if (!invFind || invFind.length === 0) throw new Error("Warehouse stock missing.");
               const targetWh = invFind[0];
               await supabase.from('inventory').update({ quantity: targetWh.quantity - diffQty, last_updated: new Date().toISOString() }).eq('id', targetWh.id);
+              
               const { data: txn } = await supabase.from('inventory_transactions').select('id').eq('reference_no', distRefCode).eq('product_id', item.product_id).single();
               if (txn) await supabase.from('inventory_transactions').update({ quantity: newQty }).eq('id', txn.id);
           }
@@ -361,6 +381,7 @@ export default function DailyDistributionReportPage() {
         await supabase.from('distribution_items').update({ quantity: newQty, total_hh: newHh }).eq('id', item.id);
       }
       await supabase.from('distributions').update({ remarks: editRemarks }).eq('id', distToEdit.id);
+      
       showMessage(`Transaction updated successfully!`, "success");
       setEditModalOpen(false);
       const idsToFetch = distributionPoints.length > 0 ? distributionPoints.map(dp => dp.id) : ['NONE-NO-ACCESS'];
@@ -377,6 +398,7 @@ export default function DailyDistributionReportPage() {
       for (const item of txnToRevert.distribution_items) {
         const { data: mItem } = await supabase.from('manifest_items').select('id, distributed_qty').eq('manifest_id', item.manifest_id).eq('product_id', item.product_id).single();
         if (mItem) await supabase.from('manifest_items').update({ distributed_qty: Math.max(0, (Number(mItem.distributed_qty) || 0) - item.quantity) }).eq('id', mItem.id);
+        
         if (!item.products?.is_open_stock) {
             const { data: invFind } = await supabase.from('inventory').select('id, quantity').in('warehouse_id', connectedWhIds).eq('product_id', item.product_id).order('quantity', { ascending: false }).limit(1);
             if (invFind && invFind.length > 0) await supabase.from('inventory').update({ quantity: invFind[0].quantity + item.quantity }).eq('id', invFind[0].id);
@@ -384,6 +406,7 @@ export default function DailyDistributionReportPage() {
       }
       await supabase.from('inventory_transactions').delete().eq('reference_no', distRefCode);
       await supabase.from('distributions').delete().eq('id', txnToRevert.id);
+      
       showMessage(`Transaction deleted & stock restored.`, "success");
       setRevertModalOpen(false);
       const idsToFetch = distributionPoints.length > 0 ? distributionPoints.map(dp => dp.id) : ['NONE-NO-ACCESS'];
@@ -413,7 +436,7 @@ export default function DailyDistributionReportPage() {
     const exportData: any[] = [];
     filteredHistory.forEach(dist => {
       const distRefCode = `DIST-${dist.id.split('-')[0].toUpperCase()}`;
-      const dateStr = new Date(dist.distribution_date).toLocaleDateString();
+      const dateStr = formatDisplayDate(dist.distribution_date);
       dist.distribution_items.forEach((item: any) => {
         exportData.push({
           "Date": dateStr,
@@ -440,9 +463,9 @@ export default function DailyDistributionReportPage() {
   const handleExportPDF = () => {
     const doc = new jsPDF('landscape');
     let dateRangeText = 'All Time';
-    if (filterStartDate && filterEndDate) dateRangeText = `${filterStartDate} to ${filterEndDate}`;
-    else if (filterStartDate) dateRangeText = `From ${filterStartDate}`;
-    else if (filterEndDate) dateRangeText = `Until ${filterEndDate}`;
+    if (filterStartDate && filterEndDate) dateRangeText = `${formatDisplayDate(filterStartDate)} to ${formatDisplayDate(filterEndDate)}`;
+    else if (filterStartDate) dateRangeText = `From ${formatDisplayDate(filterStartDate)}`;
+    else if (filterEndDate) dateRangeText = `Until ${formatDisplayDate(filterEndDate)}`;
 
     let dpNameText = filterDpId === 'ALL' ? 'All Assigned Camps' : distributionPoints.find(d => d.id === filterDpId)?.name || '';
 
@@ -459,7 +482,7 @@ export default function DailyDistributionReportPage() {
 
     filteredHistory.forEach(dist => {
       const distRefCode = `DIST-${dist.id.split('-')[0].toUpperCase()}`;
-      const dateStr = new Date(dist.distribution_date).toLocaleDateString();
+      const dateStr = formatDisplayDate(dist.distribution_date);
       dist.distribution_items.forEach((item: any) => {
         tableRows.push([
           dateStr,
@@ -499,7 +522,6 @@ export default function DailyDistributionReportPage() {
         input[type="number"] { -moz-appearance: textfield; }
       `}} />
 
-      {/* FIXED CONFLICT WITH PROFILE BUTTON: Added pr-20 to header */}
       <header className="flex min-h-20 bg-white border-b border-slate-200 items-center px-4 md:px-6 pr-20 shrink-0 shadow-sm z-20 sticky top-0 justify-between flex-wrap gap-3 py-3">
         <div className="flex items-center">
           <button onClick={() => window.history.back()} className="mr-3 p-2 rounded-full hover:bg-slate-100 text-slate-900 transition-colors">
@@ -552,9 +574,6 @@ export default function DailyDistributionReportPage() {
             ) : (
               filteredManifests.map((manifest, idx) => {
                 const theme = MANIFEST_COLORS[idx % MANIFEST_COLORS.length];
-                
-                // Fixed logic: We don't skip the manifest entirely if items are empty. 
-                // We show the header so you at least see manifest #1, #2 exists, even if items fail to map.
                 const items = allManifestItems.filter(i => i.manifest_id === manifest.id);
 
                 return (
@@ -663,7 +682,6 @@ export default function DailyDistributionReportPage() {
                </div>
                <input type="text" placeholder="Search..." value={tableSearch} onChange={(e) => setTableSearch(e.target.value)} className="w-full sm:w-auto flex-1 md:w-40 px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-bold text-slate-900 outline-none focus:border-indigo-500" />
                
-               {/* Export Buttons Added Back */}
                <div className="flex items-center space-x-2 shrink-0 w-full sm:w-auto justify-end">
                  <button onClick={handleExportExcel} className="px-3 py-2 bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-bold rounded-lg hover:bg-emerald-100 transition-colors flex items-center">
                    <Icons.Download /> <span className="ml-1">Excel</span>
@@ -692,7 +710,7 @@ export default function DailyDistributionReportPage() {
                 {paginatedHistory.map((dist) => (
                   <div key={dist.id} className="flex flex-col lg:grid lg:grid-cols-12 gap-4 px-4 py-4 border-b border-slate-100 hover:bg-slate-50">
                     <div className="lg:col-span-2 flex flex-col justify-start">
-                      <p className="font-bold text-slate-900 text-sm">{new Date(dist.distribution_date).toLocaleDateString()}</p>
+                      <p className="font-bold text-slate-900 text-sm">{formatDisplayDate(dist.distribution_date)}</p>
                       <p className="text-[10px] text-indigo-600 font-bold font-mono mt-1">DIST-{dist.id.split('-')[0].toUpperCase()}</p>
                     </div>
                     <div className="lg:col-span-3 flex flex-col justify-start">
@@ -729,7 +747,6 @@ export default function DailyDistributionReportPage() {
           </div>
 
           <div className="flex flex-col gap-4 p-4 bg-white border-t border-slate-200 rounded-b-2xl">
-            {/* Load More Button */}
             {historyItems.length < totalDbCount && (
               <div className="w-full flex justify-center pb-2">
                 <button 
@@ -742,7 +759,6 @@ export default function DailyDistributionReportPage() {
               </div>
             )}
 
-            {/* Pagination Controls */}
             {filteredHistory.length > 0 && (
               <div className="flex justify-between items-center w-full">
                 <span className="text-xs font-bold text-slate-500">Page {currentPage} of {totalPages} (Showing {paginatedHistory.length} items)</span>
@@ -775,7 +791,7 @@ export default function DailyDistributionReportPage() {
                  </div>
                  <div className="text-right">
                    <p className="text-[10px] font-bold text-slate-500 uppercase">Date</p>
-                   <p className="font-bold text-slate-900 text-sm">{new Date(detailsData.distribution_date).toLocaleDateString()}</p>
+                   <p className="font-bold text-slate-900 text-sm">{formatDisplayDate(detailsData.distribution_date)}</p>
                  </div>
                </div>
                <div>

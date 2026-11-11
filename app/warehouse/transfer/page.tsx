@@ -9,6 +9,14 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
 );
 
+// ডেট ফরম্যাট করার জন্য হেল্পার ফাংশন
+const formatDisplayDate = (dateString: string) => {
+  if (!dateString) return '';
+  const datePart = dateString.split('T')[0]; 
+  const [year, month, day] = datePart.split('-');
+  return `${day}/${month}/${year}`;
+};
+
 export default function ProductTransferPage() {
   const [warehouses, setWarehouses] = useState<any[]>([]);
   const [allWarehouses, setAllWarehouses] = useState<any[]>([]);
@@ -33,6 +41,12 @@ export default function ProductTransferPage() {
   // History Filters
   const [searchQuery, setSearchQuery] = useState('');
   const [historyWhFilter, setHistoryWhFilter] = useState('ALL');
+  const [historyDateFilter, setHistoryDateFilter] = useState('');
+
+  // Pagination States
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageChunk, setPageChunk] = useState(0); 
+  const itemsPerPage = 5;
 
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [transferToEdit, setTransferToEdit] = useState<any>(null);
@@ -51,6 +65,11 @@ export default function ProductTransferPage() {
     fetchInitialData();
   }, []);
 
+  useEffect(() => {
+    setCurrentPage(1);
+    setPageChunk(0);
+  }, [searchQuery, historyWhFilter, historyDateFilter]);
+
   const fetchInitialData = async () => {
     setIsLoading(true);
     try {
@@ -66,7 +85,6 @@ export default function ProductTransferPage() {
         const roleName = String(roleData?.role_name || profile?.role || sessionUser?.role || '').toUpperCase();
         const isSuperAdmin = roleName.includes('SUPER ADMIN') || roleName === 'ADMIN' || roleName.includes('WEB ADMIN');
 
-        // Bulletproof Logic for Fetching assigned_wh_ids
         let rawIds = sessionUser?.assigned_wh_ids;
         if (!rawIds && user?.id) {
             const { data: pData } = await supabase.from('profiles').select('assigned_wh_ids').eq('id', user.id).single();
@@ -119,14 +137,14 @@ export default function ProductTransferPage() {
               id, quantity, product_id,
               products (name, code, unit_type, product_type)
             )
-        `).order('created_at', { ascending: false }).limit(150);
+        `).order('created_at', { ascending: false }).limit(500);
 
         if (!isSuperAdmin) {
             if (assignedIds.length > 0) {
                 const idStr = assignedIds.join(',');
                 tQuery = tQuery.or(`from_warehouse_id.in.(${idStr}),to_warehouse_id.in.(${idStr})`);
             } else {
-                tQuery = tQuery.eq('id', '00000000-0000-0000-0000-000000000000'); // Force empty if no access
+                tQuery = tQuery.eq('id', '00000000-0000-0000-0000-000000000000'); 
             }
         }
 
@@ -180,7 +198,7 @@ export default function ProductTransferPage() {
       product_id: stockItem.product_id, 
       products: stockItem.products,
       max_qty: stockItem.quantity,
-      transfer_qty: 1 
+      transfer_qty: '' // Default to blank
     }]);
   };
 
@@ -188,6 +206,7 @@ export default function ProductTransferPage() {
     const qty = parseInt(qtyStr) || 0;
     setTransferItems(transferItems.map(item => {
       if (item.product_id === productId) {
+        if (qtyStr === '') return { ...item, transfer_qty: '' };
         const validQty = qty > item.max_qty ? item.max_qty : (qty < 0 ? 0 : qty);
         return { ...item, transfer_qty: validQty };
       }
@@ -199,7 +218,7 @@ export default function ProductTransferPage() {
     setTransferItems(transferItems.filter(i => i.product_id !== productId));
   };
 
-  // 🚀 DIRECT STORE LOGIC
+  // 🚀 DIRECT STORE LOGIC - (Only Date Applied)
   const handleSubmitTransfer = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!sourceWh || transferItems.length === 0) {
@@ -210,7 +229,7 @@ export default function ProductTransferPage() {
       showMessage("Please select the target destination.", "error");
       return;
     }
-    if (transferItems.some(i => i.transfer_qty <= 0)) {
+    if (transferItems.some(i => !i.transfer_qty || i.transfer_qty <= 0)) {
       showMessage("Transfer quantities must be greater than 0.", "error");
       return;
     }
@@ -220,7 +239,7 @@ export default function ProductTransferPage() {
     try {
       const statusStr = 'Completed'; 
 
-      // 1. Create Transfer Header
+      // 1. Create Transfer Header (Only Date passed to created_at)
       const { data: transferData, error: transferError } = await supabase
         .from('stock_transfers')
         .insert([{
@@ -229,7 +248,8 @@ export default function ProductTransferPage() {
           to_warehouse_id: destType === 'WH' ? destId : null,
           to_partner_id: destType === 'PARTNER' ? destId : null,
           destination_type: destType,
-          transfer_date: transferDate,
+          transfer_date: transferDate, 
+          created_at: transferDate, // Only Date
           remarks: remarks,
           status: statusStr,
           created_by: currentUser?.id || null,
@@ -259,6 +279,7 @@ export default function ProductTransferPage() {
           reference_no: referenceNo || null,
           transfer_id: transferData.id,
           remarks: `${txnIdString} | Sent to ${destType}`,
+          created_at: transferDate, // Only Date
           created_by: currentUser?.id || null,
           created_by_email: currentUser?.email || null
         });
@@ -286,6 +307,7 @@ export default function ProductTransferPage() {
               reference_no: referenceNo || null,
               transfer_id: transferData.id,
               remarks: `${txnIdString} | Direct Received from WH Transfer`,
+              created_at: transferDate, // Only Date 
               created_by: currentUser?.id || null,
               created_by_email: currentUser?.email || null
             });
@@ -323,13 +345,11 @@ export default function ProductTransferPage() {
 
       if (items) {
         for (const item of items) {
-          // Revert Source WH (Add stock back)
           const { data: sourceInv } = await supabase.from('inventory').select('id, quantity').eq('warehouse_id', transferToCancel.from_warehouse_id).eq('product_id', item.product_id).single();
           if (sourceInv) {
             await supabase.from('inventory').update({ quantity: sourceInv.quantity + item.quantity }).eq('id', sourceInv.id);
           }
 
-          // Revert Target WH (Remove stock) if WH transfer
           if (transferToCancel.destination_type === 'WH' && transferToCancel.to_warehouse_id) {
              const { data: targetInv } = await supabase.from('inventory').select('id, quantity').eq('warehouse_id', transferToCancel.to_warehouse_id).eq('product_id', item.product_id).single();
              if (targetInv) {
@@ -339,9 +359,7 @@ export default function ProductTransferPage() {
         }
       }
 
-      // Delete BOTH IN and OUT transactions for this transfer
       await supabase.from('inventory_transactions').delete().eq('transfer_id', transferToCancel.id);
-
       await supabase.from('stock_transfers').update({ 
         status: 'Cancelled',
         updated_by: currentUser?.id || null,
@@ -365,7 +383,8 @@ export default function ProductTransferPage() {
     if (transfer.status === 'Cancelled') return;
 
     setTransferToEdit(transfer);
-    setEditDate(transfer.transfer_date || '');
+    const initialEditDate = transfer.transfer_date || transfer.created_at.split('T')[0];
+    setEditDate(initialEditDate);
     setEditRemarks(transfer.remarks || '');
     setEditItems([]);
     setOriginalEditItems([]);
@@ -423,7 +442,6 @@ export default function ProductTransferPage() {
         if (oldItem && oldItem.original_qty !== item.quantity) {
           const diff = item.quantity - oldItem.original_qty;
 
-          // Process Source WH (Takes stock OUT)
           const { data: sourceInv } = await supabase.from('inventory')
             .select('id, quantity').eq('warehouse_id', transferToEdit.from_warehouse_id)
             .eq('product_id', item.product_id).single();
@@ -436,7 +454,6 @@ export default function ProductTransferPage() {
             await supabase.from('inventory').update({ quantity: sourceInv.quantity - diff }).eq('id', sourceInv.id);
           }
 
-          // Process Target WH (Puts stock IN)
           if (transferToEdit.destination_type === 'WH' && transferToEdit.to_warehouse_id) {
              const { data: targetInv } = await supabase.from('inventory')
                 .select('id, quantity').eq('warehouse_id', transferToEdit.to_warehouse_id)
@@ -447,15 +464,12 @@ export default function ProductTransferPage() {
              }
           }
 
-          // Update Item Record
           await supabase.from('stock_transfer_items').update({ quantity: item.quantity }).eq('id', item.id);
 
-          // Update Source Ledger (OUT)
           const { data: outTxn } = await supabase.from('inventory_transactions')
             .select('id, quantity').eq('transfer_id', transferToEdit.id).eq('transaction_type', 'OUT').eq('product_id', item.product_id).single();
           if (outTxn) await supabase.from('inventory_transactions').update({ quantity: item.quantity }).eq('id', outTxn.id);
 
-          // Update Target Ledger (IN)
           if (transferToEdit.destination_type === 'WH') {
              const { data: inTxn } = await supabase.from('inventory_transactions')
                 .select('id, quantity').eq('transfer_id', transferToEdit.id).eq('transaction_type', 'IN').eq('product_id', item.product_id).single();
@@ -464,15 +478,21 @@ export default function ProductTransferPage() {
         }
       }
 
+      // Update Dates across main table and ledger (Only Date)
       await supabase.from('stock_transfers')
         .update({ 
           transfer_date: editDate, 
+          created_at: editDate, 
           remarks: editRemarks,
           updated_by: currentUser?.id || null,
           updated_by_email: currentUser?.email || null,
           updated_at: new Date().toISOString()
         })
         .eq('id', transferToEdit.id);
+        
+      await supabase.from('inventory_transactions')
+        .update({ created_at: editDate })
+        .eq('transfer_id', transferToEdit.id);
 
       showMessage("Transfer details updated and stock re-adjusted everywhere!", "success");
       setEditModalOpen(false);
@@ -486,32 +506,77 @@ export default function ProductTransferPage() {
     }
   };
 
-  // Helper function to prevent scroll on number inputs
   const preventScroll = (e: React.WheelEvent<HTMLInputElement>) => {
     (e.target as HTMLInputElement).blur();
   };
 
+  // --- UI FILTERING LOGIC ---
   const filteredTransfers = recentTransfers.filter(t => {
     const query = searchQuery.toLowerCase();
     const destName = t.destination_type === 'WH' ? t.to_warehouse?.name : (t.destination_type === 'PARTNER' ? t.to_partner?.name : 'Contingency Stock');
     const txnMatch = t.id.toLowerCase().includes(query);
     const poMatch = (t.reference_no || '').toLowerCase().includes(query);
+    
+    const productMatch = t.stock_transfer_items?.some((i: any) => 
+        (i.products?.name || '').toLowerCase().includes(query) || 
+        (i.products?.code || '').toLowerCase().includes(query)
+    );
 
-    const searchCondition = txnMatch || poMatch ||
+    const searchCondition = txnMatch || poMatch || productMatch ||
            (t.from_warehouse?.name || '').toLowerCase().includes(query) ||
            (destName || '').toLowerCase().includes(query);
 
-    const filterCondition = historyWhFilter === 'ALL' 
+    const filterWhCondition = historyWhFilter === 'ALL' 
            ? true 
            : (t.from_warehouse_id === historyWhFilter || t.to_warehouse_id === historyWhFilter);
+           
+    const tDateStr = t.transfer_date || t.created_at.split('T')[0];
+    const filterDateCondition = !historyDateFilter || tDateStr === historyDateFilter;
 
-    return searchCondition && filterCondition;
+    return searchCondition && filterWhCondition && filterDateCondition;
   });
+
+  // --- PAGINATION LOGIC ---
+  const totalPages = Math.ceil(filteredTransfers.length / itemsPerPage);
+  const currentChunkStartPage = pageChunk * 5 + 1;
+  const currentChunkEndPage = Math.min(currentChunkStartPage + 4, totalPages);
+  
+  const displayedPages = [];
+  for (let i = currentChunkStartPage; i <= currentChunkEndPage; i++) {
+    displayedPages.push(i);
+  }
+
+  const paginatedTransfers = filteredTransfers.slice(
+    (currentPage - 1) * itemsPerPage,
+    currentPage * itemsPerPage
+  );
+
+  const handleNextPage = () => {
+    if (currentPage < totalPages) {
+        const nextPage = currentPage + 1;
+        setCurrentPage(nextPage);
+        if (nextPage > currentChunkEndPage) setPageChunk(pageChunk + 1);
+    }
+  };
+
+  const handlePrevPage = () => {
+    if (currentPage > 1) {
+        const prevPage = currentPage - 1;
+        setCurrentPage(prevPage);
+        if (prevPage < currentChunkStartPage) setPageChunk(pageChunk - 1);
+    }
+  };
+
+  const handleLoadMoreChunk = () => {
+      if (currentChunkEndPage < totalPages) {
+          setPageChunk(pageChunk + 1);
+          setCurrentPage(currentChunkEndPage + 1);
+      }
+  };
 
   return (
     <div className="flex flex-col h-full bg-slate-50 w-full animate-in fade-in duration-500 relative">
 
-      {/* Global style to hide number input arrows (spinners) */}
       <style dangerouslySetInnerHTML={{__html: `
         input[type="number"]::-webkit-inner-spin-button,
         input[type="number"]::-webkit-outer-spin-button {
@@ -610,14 +675,14 @@ export default function ProductTransferPage() {
             </form>
           </div>
 
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm xl:col-span-2 flex flex-col h-[650px] xl:h-auto overflow-hidden">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm xl:col-span-2 flex flex-col min-h-[500px] overflow-hidden">
              <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
-                <div className="w-full md:w-1/2 flex flex-col border-b md:border-b-0 md:border-r border-slate-200 bg-slate-50/50">
+                <div className="w-full md:w-1/2 flex flex-col border-b md:border-b-0 md:border-r border-slate-200 bg-slate-50/50 min-h-[350px]">
                    <div className="p-4 border-b border-slate-200 bg-white shrink-0">
                      <h4 className="font-bold text-slate-800 text-xs uppercase tracking-wide">Available in Source</h4>
                      <p className="text-[10px] text-slate-500 mt-0.5">Select a source warehouse first.</p>
                    </div>
-                   <div className="flex-1 overflow-y-auto p-3 space-y-2 custom-scrollbar">
+                   <div className="flex-1 overflow-y-auto p-3 space-y-2 max-h-[400px] md:max-h-none custom-scrollbar">
                      {isLoading ? (
                        <div className="text-center p-6"><Icons.Spinner /></div>
                      ) : !sourceWh ? (
@@ -649,7 +714,7 @@ export default function ProductTransferPage() {
                    </div>
                 </div>
 
-                <div className="w-full md:w-1/2 flex flex-col bg-white">
+                <div className="w-full md:w-1/2 flex flex-col bg-white min-h-[400px]">
                    <div className="p-4 border-b border-indigo-100 bg-indigo-50 shrink-0 flex justify-between items-center">
                      <h4 className="font-bold text-indigo-900 text-xs uppercase flex items-center">
                        <Icons.Manifest /> <span className="ml-2">Issue Bag</span>
@@ -659,7 +724,7 @@ export default function ProductTransferPage() {
                      </div>
                    </div>
 
-                   <div className="flex-1 overflow-y-auto p-3 space-y-3 custom-scrollbar relative">
+                   <div className="flex-1 overflow-y-auto p-3 space-y-3 max-h-[400px] md:max-h-none custom-scrollbar relative">
                      {transferItems.length === 0 ? (
                        <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400 text-center p-4">
                          <span className="text-4xl mb-3 opacity-50">📦</span>
@@ -682,10 +747,11 @@ export default function ProductTransferPage() {
                                <span className="text-[10px] font-bold text-slate-700 uppercase">Qty:</span>
                                <input 
                                  type="number" min="1" max={item.max_qty}
-                                 value={item.transfer_qty || ''} 
+                                 value={item.transfer_qty} 
                                  onChange={(e) => handleUpdateTransferQty(item.product_id, e.target.value)}
                                  onWheel={preventScroll}
                                  className="w-20 text-right px-2 py-1 bg-white border border-slate-300 rounded-md text-xs font-bold text-emerald-700 outline-none focus:border-emerald-500"
+                                 placeholder="0"
                                />
                              </div>
                            </div>
@@ -693,7 +759,7 @@ export default function ProductTransferPage() {
                        ))
                      )}
                    </div>
-                   <div className="p-4 border-t border-slate-200 bg-slate-50 shrink-0">
+                   <div className="p-4 border-t border-slate-200 bg-slate-50 shrink-0 mt-auto">
                       <button type="submit" form="transfer-form" disabled={isSubmitting || transferItems.length === 0} className="w-full bg-slate-800 hover:bg-slate-900 text-white font-bold py-3 rounded-xl text-sm transition-all shadow-md flex justify-center disabled:opacity-50">
                         {isSubmitting ? <><Icons.Spinner /> Processing...</> : 'Confirm Direct Transfer'}
                       </button>
@@ -708,9 +774,21 @@ export default function ProductTransferPage() {
            <div className="p-4 border-b border-slate-100 flex flex-col lg:flex-row justify-between items-center bg-slate-50/50 gap-4">
               <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wide">Recent Transfers / Issues</h3>
               <div className="flex flex-col sm:flex-row items-center space-y-3 sm:space-y-0 sm:space-x-3 w-full lg:w-auto">
+                 
+                 {/* Date Filter */}
+                 <div className="w-full sm:w-auto">
+                   <input 
+                     type="date" 
+                     value={historyDateFilter} 
+                     onChange={(e) => setHistoryDateFilter(e.target.value)}
+                     className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-900 outline-none focus:border-indigo-500" 
+                     title="Filter by Transfer Date"
+                   />
+                 </div>
+
                  <div className="relative w-full sm:w-64">
                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"><Icons.Search /></div>
-                   <input type="text" placeholder="Search TXN, Source, Dest..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} className="w-full pl-10 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-900 outline-none focus:border-indigo-500" />
+                   <input type="text" placeholder="Search TXN, Product, Source..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} className="w-full pl-10 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-900 outline-none focus:border-indigo-500" />
                  </div>
               </div>
            </div>
@@ -730,10 +808,10 @@ export default function ProductTransferPage() {
                 <tbody className="divide-y divide-slate-100">
                   {isLoading ? (
                     <tr><td colSpan={6} className="p-10 text-center"><Icons.Spinner /></td></tr>
-                  ) : filteredTransfers.length === 0 ? (
+                  ) : paginatedTransfers.length === 0 ? (
                     <tr><td colSpan={6} className="p-10 text-center text-sm text-slate-500 font-medium">No recent transfers found.</td></tr>
                   ) : (
-                    filteredTransfers.map((t) => {
+                    paginatedTransfers.map((t) => {
                       const isDisabled = t.status === 'Cancelled' || t.status === 'Rejected';
                       const txnId = `TXN-${t.id.split('-')[0].toUpperCase()}`;
                       const totalQty = t.stock_transfer_items?.reduce((sum: number, i: any) => sum + i.quantity, 0) || 0;
@@ -741,7 +819,7 @@ export default function ProductTransferPage() {
                       return (
                         <tr key={t.id} className={`hover:bg-slate-50 group transition-colors ${isDisabled ? 'grayscale opacity-70' : ''}`}>
                           <td className="px-4 py-3 align-top">
-                            <p className="font-bold text-slate-900 text-sm">{new Date(t.transfer_date).toLocaleDateString()}</p>
+                            <p className="font-bold text-slate-900 text-sm">{formatDisplayDate(t.transfer_date || t.created_at)}</p>
                             <p className="text-[10px] text-indigo-600 font-mono mt-0.5 font-bold">{txnId}</p>
                             {t.reference_no && <p className="text-[9px] text-slate-400 mt-0.5">PO: {t.reference_no}</p>}
                           </td>
@@ -802,6 +880,49 @@ export default function ProductTransferPage() {
                 </tbody>
              </table>
            </div>
+
+           {/* --- PAGINATION CONTROLS --- */}
+           {totalPages > 1 && (
+             <div className="p-4 border-t border-slate-100 bg-slate-50 flex items-center justify-between">
+                <p className="text-xs text-slate-500 font-medium">
+                  Showing <span className="font-bold text-slate-900">{(currentPage - 1) * itemsPerPage + 1}</span> to <span className="font-bold text-slate-900">{Math.min(currentPage * itemsPerPage, filteredTransfers.length)}</span> of <span className="font-bold text-slate-900">{filteredTransfers.length}</span> entries
+                </p>
+                
+                <div className="flex items-center space-x-1">
+                  <button 
+                    onClick={handlePrevPage} 
+                    disabled={currentPage === 1}
+                    className="px-3 py-1.5 border border-slate-200 bg-white rounded-lg text-xs font-bold text-slate-600 disabled:opacity-50 hover:bg-slate-100 transition-colors"
+                  >
+                    Prev
+                  </button>
+                  
+                  {displayedPages.map(page => (
+                    <button 
+                      key={page} 
+                      onClick={() => setCurrentPage(page)}
+                      className={`w-8 h-8 rounded-lg text-xs font-bold transition-colors ${currentPage === page ? 'bg-indigo-600 text-white shadow-sm' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'}`}
+                    >
+                      {page}
+                    </button>
+                  ))}
+
+                  {currentChunkEndPage < totalPages && (
+                    <button onClick={handleLoadMoreChunk} className="px-3 py-1.5 bg-indigo-50 text-indigo-600 text-xs font-bold rounded-lg hover:bg-indigo-100 transition-colors ml-1">
+                      See More...
+                    </button>
+                  )}
+
+                  <button 
+                    onClick={handleNextPage} 
+                    disabled={currentPage === totalPages}
+                    className="px-3 py-1.5 border border-slate-200 bg-white rounded-lg text-xs font-bold text-slate-600 disabled:opacity-50 hover:bg-slate-100 transition-colors ml-1"
+                  >
+                    Next
+                  </button>
+                </div>
+             </div>
+           )}
         </div>
       </div>
 
@@ -821,7 +942,7 @@ export default function ProductTransferPage() {
                <div className="grid grid-cols-2 gap-4 bg-slate-50 p-4 rounded-xl border border-slate-100">
                  <div>
                    <p className="text-[9px] font-bold text-slate-500 uppercase">Transfer Date</p>
-                   <p className="text-sm font-bold text-slate-800">{new Date(selectedTransferDetails.transfer_date).toLocaleDateString()}</p>
+                   <p className="text-sm font-bold text-slate-800">{formatDisplayDate(selectedTransferDetails.transfer_date || selectedTransferDetails.created_at)}</p>
                  </div>
                  <div>
                    <p className="text-[9px] font-bold text-slate-500 uppercase">Status</p>
