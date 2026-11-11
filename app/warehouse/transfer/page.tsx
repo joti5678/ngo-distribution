@@ -17,6 +17,16 @@ const formatDisplayDate = (dateString: string) => {
   return `${day}/${month}/${year}`;
 };
 
+// সিলেক্ট করা তারিখের সাথে বর্তমান সময় যুক্ত করার ফাংশন (সঠিক সর্টিংয়ের জন্য)
+const getSortableDateString = (selectedDateStr: string) => {
+  if (!selectedDateStr) return '';
+  const now = new Date();
+  const hours = String(now.getHours()).padStart(2, '0');
+  const minutes = String(now.getMinutes()).padStart(2, '0');
+  const seconds = String(now.getSeconds()).padStart(2, '0');
+  return `${selectedDateStr}T${hours}:${minutes}:${seconds}.000Z`;
+};
+
 export default function ProductTransferPage() {
   const [warehouses, setWarehouses] = useState<any[]>([]);
   const [allWarehouses, setAllWarehouses] = useState<any[]>([]);
@@ -218,7 +228,7 @@ export default function ProductTransferPage() {
     setTransferItems(transferItems.filter(i => i.product_id !== productId));
   };
 
-  // 🚀 DIRECT STORE LOGIC - (Only Date Applied)
+  // 🚀 DIRECT STORE LOGIC - (Date + Time Applied for Sorting)
   const handleSubmitTransfer = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!sourceWh || transferItems.length === 0) {
@@ -238,8 +248,10 @@ export default function ProductTransferPage() {
 
     try {
       const statusStr = 'Completed'; 
+      // 🚀 FIXED: Generating exact timestamp based on selected date
+      const exactDateTimeStr = getSortableDateString(transferDate);
 
-      // 1. Create Transfer Header (Only Date passed to created_at)
+      // 1. Create Transfer Header
       const { data: transferData, error: transferError } = await supabase
         .from('stock_transfers')
         .insert([{
@@ -249,7 +261,7 @@ export default function ProductTransferPage() {
           to_partner_id: destType === 'PARTNER' ? destId : null,
           destination_type: destType,
           transfer_date: transferDate, 
-          created_at: transferDate, // Only Date
+          created_at: exactDateTimeStr, // Updated to Date+Time for sorting
           remarks: remarks,
           status: statusStr,
           created_by: currentUser?.id || null,
@@ -279,7 +291,7 @@ export default function ProductTransferPage() {
           reference_no: referenceNo || null,
           transfer_id: transferData.id,
           remarks: `${txnIdString} | Sent to ${destType}`,
-          created_at: transferDate, // Only Date
+          created_at: exactDateTimeStr, 
           created_by: currentUser?.id || null,
           created_by_email: currentUser?.email || null
         });
@@ -307,7 +319,7 @@ export default function ProductTransferPage() {
               reference_no: referenceNo || null,
               transfer_id: transferData.id,
               remarks: `${txnIdString} | Direct Received from WH Transfer`,
-              created_at: transferDate, // Only Date 
+              created_at: exactDateTimeStr,  
               created_by: currentUser?.id || null,
               created_by_email: currentUser?.email || null
             });
@@ -435,6 +447,7 @@ export default function ProductTransferPage() {
     }
 
     setIsSubmitting(true);
+    const exactDateTimeStr = getSortableDateString(editDate);
 
     try {
       for (const item of editItems) {
@@ -478,11 +491,10 @@ export default function ProductTransferPage() {
         }
       }
 
-      // Update Dates across main table and ledger (Only Date)
       await supabase.from('stock_transfers')
         .update({ 
           transfer_date: editDate, 
-          created_at: editDate, 
+          created_at: exactDateTimeStr, 
           remarks: editRemarks,
           updated_by: currentUser?.id || null,
           updated_by_email: currentUser?.email || null,
@@ -491,7 +503,7 @@ export default function ProductTransferPage() {
         .eq('id', transferToEdit.id);
         
       await supabase.from('inventory_transactions')
-        .update({ created_at: editDate })
+        .update({ created_at: exactDateTimeStr })
         .eq('transfer_id', transferToEdit.id);
 
       showMessage("Transfer details updated and stock re-adjusted everywhere!", "success");

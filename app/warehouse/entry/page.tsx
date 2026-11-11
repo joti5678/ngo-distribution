@@ -11,12 +11,22 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
 );
 
-// ডেট ফরম্যাট করার জন্য হেল্পার ফাংশন (যাতে টাইমজোনের কারণে তারিখ পরিবর্তন না হয়)
+// ডেট ফরম্যাট করার জন্য হেল্পার ফাংশন
 const formatDisplayDate = (dateString: string) => {
   if (!dateString) return '';
   const datePart = dateString.split('T')[0]; 
   const [year, month, day] = datePart.split('-');
   return `${day}/${month}/${year}`;
+};
+
+// সিলেক্ট করা তারিখের সাথে বর্তমান সময় যুক্ত করার ফাংশন (সঠিক সর্টিংয়ের জন্য)
+const getSortableDateString = (selectedDateStr: string) => {
+  if (!selectedDateStr) return '';
+  const now = new Date();
+  const hours = String(now.getHours()).padStart(2, '0');
+  const minutes = String(now.getMinutes()).padStart(2, '0');
+  const seconds = String(now.getSeconds()).padStart(2, '0');
+  return `${selectedDateStr}T${hours}:${minutes}:${seconds}.000Z`;
 };
 
 export default function BulkEntryPage() {
@@ -179,7 +189,6 @@ export default function BulkEntryPage() {
     } catch(err) { }
   };
 
-  // 🚀 BULK ENTRY LOGIC (Only Date passed to Database)
   const handleStockEntry = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!bulkWarehouseId || bagItems.length === 0) {
@@ -199,6 +208,9 @@ export default function BulkEntryPage() {
       const sourceName = receiveSourceType === 'CONTINGENCY' ? 'Contingency Stock' : 
                          receiveSourceType === 'BULK_ENTRY' ? 'Initial Bulk Entry' : 'Donor/Partner';
 
+      // 🚀 FIXED: Generating exact timestamp based on selected date to ensure proper sorting
+      const exactDateTimeStr = getSortableDateString(entryDate);
+
       for (const item of bagItems) {
         const { data: invData } = await supabase.from('inventory')
           .select('*').eq('warehouse_id', bulkWarehouseId).eq('product_id', item.product_id).single();
@@ -212,7 +224,6 @@ export default function BulkEntryPage() {
             .insert([{ warehouse_id: bulkWarehouseId, product_id: item.product_id, quantity: item.qty }]);
         }
 
-        // টাইম রিমুভ করে শুধু ডেট পাঠানো হচ্ছে
         await supabase.from('inventory_transactions').insert([{
           warehouse_id: bulkWarehouseId,
           product_id: item.product_id,
@@ -223,7 +234,7 @@ export default function BulkEntryPage() {
           remarks: bulkRemarks || `Received via ${sourceName}`,
           created_by: currentUser?.id || null,
           created_by_email: currentUser?.email || null,
-          created_at: entryDate // ONLY DATE
+          created_at: exactDateTimeStr // 👈 Time included for sorting, but exact date maintained
         }]);
       }
 
@@ -332,7 +343,6 @@ export default function BulkEntryPage() {
          await supabase.from('inventory').insert([{ warehouse_id: editingTxn.warehouse_id, product_id: editingTxn.product_id, quantity: qtyDiff }]);
       }
       
-      // Update with current user details but retain the original date
       await supabase.from('inventory_transactions').update({ 
         quantity: newQty, 
         updated_by: currentUser?.id || null, 

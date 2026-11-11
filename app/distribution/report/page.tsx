@@ -12,12 +12,22 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
 );
 
-// ডেট ফরম্যাট করার হেল্পার ফাংশন (টাইমজোন শিফট রোধ করার জন্য)
+// ডেট ফরম্যাট করার হেল্পার ফাংশন
 const formatDisplayDate = (dateString: string) => {
   if (!dateString) return '';
   const datePart = dateString.split('T')[0]; 
   const [year, month, day] = datePart.split('-');
   return `${day}/${month}/${year}`;
+};
+
+// সিলেক্ট করা তারিখের সাথে বর্তমান সময় যুক্ত করার ফাংশন (সঠিক সর্টিংয়ের জন্য)
+const getSortableDateString = (selectedDateStr: string) => {
+  if (!selectedDateStr) return '';
+  const now = new Date();
+  const hours = String(now.getHours()).padStart(2, '0');
+  const minutes = String(now.getMinutes()).padStart(2, '0');
+  const seconds = String(now.getSeconds()).padStart(2, '0');
+  return `${selectedDateStr}T${hours}:${minutes}:${seconds}.000Z`;
 };
 
 const MANIFEST_COLORS = [
@@ -140,7 +150,6 @@ export default function DailyDistributionReportPage() {
       setActiveManifests([]); setAllManifestItems([]); setInputs({}); setHistoryItems([]); return;
     }
 
-    // 1. Fetch Active Manifests
     const { data: mData } = await supabase.from('manifests')
       .select('*, dp:distribution_points(*)')
       .eq('status', 'Active')
@@ -181,7 +190,6 @@ export default function DailyDistributionReportPage() {
       setAllManifestItems([]); 
     }
 
-    // 2. Fetch History with Limit and Total Count
     const { count } = await supabase.from('distributions').select('*', { count: 'exact', head: true }).in('distribution_point_id', allowedDpIds);
     setTotalDbCount(count || 0);
 
@@ -192,8 +200,8 @@ export default function DailyDistributionReportPage() {
         distribution_items (id, quantity, total_hh, product_id, manifest_id, products (name, code, unit_type, product_type, is_open_stock), manifests (title, manifest_code))
       `)
       .in('distribution_point_id', allowedDpIds)
-      .order('distribution_date', { ascending: false })
-      .order('created_at', { ascending: false })
+      .order('distribution_date', { ascending: false }) // Primary Sort by selected date
+      .order('created_at', { ascending: false }) // Secondary Sort by precise insertion time
       .limit(limit);
 
     setHistoryItems(hData || []);
@@ -271,11 +279,14 @@ export default function DailyDistributionReportPage() {
 
     setIsSubmitting(true);
     try {
+      // 🚀 FIXED: Generating exact timestamp based on selected date to ensure proper sorting
+      const exactDateTimeStr = getSortableDateString(distDate);
+
       for (const dpId of dpIdsToSubmit) {
-        // Here created_at will default to now(), but distribution_date correctly stores the selected date
         const { data: distHeader, error: distErr } = await supabase.from('distributions').insert([{
           distribution_point_id: dpId, 
           distribution_date: distDate, 
+          created_at: exactDateTimeStr, // Preserves selected date but keeps sorting order
           remarks: remarks || null,
           created_by: currentUser?.id || null, 
           created_by_email: currentUser?.email || null
@@ -301,7 +312,6 @@ export default function DailyDistributionReportPage() {
                 
                 await supabase.from('inventory').update({ quantity: Math.max(0, targetWh.quantity - distQty), last_updated: new Date().toISOString() }).eq('id', targetWh.id);
                 
-                // 🚀 FIXED: Only passing selected 'distDate' as 'created_at' without current time
                 await supabase.from('inventory_transactions').insert([{
                   warehouse_id: targetWh.warehouse_id, 
                   product_id: item.product_id, 
@@ -311,7 +321,7 @@ export default function DailyDistributionReportPage() {
                   remarks: `Distributed at ${payload.manifest.dp?.name}`,
                   created_by: currentUser?.id, 
                   created_by_email: currentUser?.email, 
-                  created_at: distDate // 👈 No time component used here
+                  created_at: exactDateTimeStr // Ensures precise sorting in ledger
                 }]);
             }
           }
@@ -424,7 +434,7 @@ export default function DailyDistributionReportPage() {
     else if (filterEndDate) matchDate = dist.distribution_date <= filterEndDate;
     const q = tableSearch.toLowerCase();
     const matchSearch = q ? dist.distribution_items.some((item: any) => 
-      item.products.name.toLowerCase().includes(q) || item.manifests?.title.toLowerCase().includes(q) || dist.id.toLowerCase().includes(q)
+      item.products.name.toLowerCase().includes(q) || item.products.code.toLowerCase().includes(q) || item.manifests?.title.toLowerCase().includes(q) || dist.id.toLowerCase().includes(q)
     ) : true;
     return matchDp && matchDate && matchSearch;
   });
@@ -680,8 +690,9 @@ export default function DailyDistributionReportPage() {
                  <span className="text-xs font-bold text-slate-400">-</span>
                  <input type="date" value={filterEndDate} onChange={(e) => setFilterEndDate(e.target.value)} className="w-full px-2 py-2 bg-white border border-slate-300 rounded-lg text-xs font-bold text-slate-900 outline-none focus:border-indigo-500" title="To Date" />
                </div>
-               <input type="text" placeholder="Search..." value={tableSearch} onChange={(e) => setTableSearch(e.target.value)} className="w-full sm:w-auto flex-1 md:w-40 px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-bold text-slate-900 outline-none focus:border-indigo-500" />
+               <input type="text" placeholder="Search Code, Name..." value={tableSearch} onChange={(e) => setTableSearch(e.target.value)} className="w-full sm:w-auto flex-1 md:w-40 px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-bold text-slate-900 outline-none focus:border-indigo-500" />
                
+               {/* Export Buttons Added Back */}
                <div className="flex items-center space-x-2 shrink-0 w-full sm:w-auto justify-end">
                  <button onClick={handleExportExcel} className="px-3 py-2 bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-bold rounded-lg hover:bg-emerald-100 transition-colors flex items-center">
                    <Icons.Download /> <span className="ml-1">Excel</span>
@@ -747,6 +758,7 @@ export default function DailyDistributionReportPage() {
           </div>
 
           <div className="flex flex-col gap-4 p-4 bg-white border-t border-slate-200 rounded-b-2xl">
+            {/* Load More Button */}
             {historyItems.length < totalDbCount && (
               <div className="w-full flex justify-center pb-2">
                 <button 
@@ -759,6 +771,7 @@ export default function DailyDistributionReportPage() {
               </div>
             )}
 
+            {/* Pagination Controls */}
             {filteredHistory.length > 0 && (
               <div className="flex justify-between items-center w-full">
                 <span className="text-xs font-bold text-slate-500">Page {currentPage} of {totalPages} (Showing {paginatedHistory.length} items)</span>
