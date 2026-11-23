@@ -47,6 +47,7 @@ export default function ProductTransferPage() {
   const [referenceNo, setReferenceNo] = useState(''); 
 
   const [transferItems, setTransferItems] = useState<any[]>([]);
+  const [productSearch, setProductSearch] = useState('');
 
   // History Filters
   const [searchQuery, setSearchQuery] = useState('');
@@ -181,6 +182,7 @@ export default function ProductTransferPage() {
   };
 
   useEffect(() => {
+    setProductSearch('');
     if (sourceWh) {
       fetchAvailableStock(sourceWh);
       setTransferItems([]);
@@ -522,6 +524,18 @@ export default function ProductTransferPage() {
     (e.target as HTMLInputElement).blur();
   };
 
+  // --- SOURCE PRODUCT FILTERING LOGIC ---
+  const filteredAvailableStock = availableStock.filter(stock => {
+    const q = productSearch.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      (stock.products?.name || '').toLowerCase().includes(q) ||
+      (stock.products?.code || '').toLowerCase().includes(q) ||
+      (stock.products?.product_type || '').toLowerCase().includes(q) ||
+      (stock.products?.unit_type || '').toLowerCase().includes(q)
+    );
+  });
+
   // --- UI FILTERING LOGIC ---
   const filteredTransfers = recentTransfers.filter(t => {
     const query = searchQuery.toLowerCase();
@@ -690,9 +704,41 @@ export default function ProductTransferPage() {
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm xl:col-span-2 flex flex-col min-h-[500px] overflow-hidden">
              <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
                 <div className="w-full md:w-1/2 flex flex-col border-b md:border-b-0 md:border-r border-slate-200 bg-slate-50/50 min-h-[350px]">
-                   <div className="p-4 border-b border-slate-200 bg-white shrink-0">
-                     <h4 className="font-bold text-slate-800 text-xs uppercase tracking-wide">Available in Source</h4>
-                     <p className="text-[10px] text-slate-500 mt-0.5">Select a source warehouse first.</p>
+                   <div className="p-4 border-b border-slate-200 bg-white shrink-0 space-y-2.5">
+                     <div className="flex items-center justify-between">
+                       <div>
+                         <h4 className="font-bold text-slate-800 text-xs uppercase tracking-wide">Available in Source</h4>
+                         <p className="text-[10px] text-slate-500 mt-0.5">
+                           {sourceWh
+                             ? `${filteredAvailableStock.length} of ${availableStock.length} item(s) shown`
+                             : 'Select a source warehouse first.'}
+                         </p>
+                       </div>
+                     </div>
+
+                     <div className="relative">
+                       <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
+                         <Icons.Search />
+                       </div>
+                       <input
+                         type="text"
+                         placeholder="Search by name, code, or type..."
+                         value={productSearch}
+                         onChange={(e) => setProductSearch(e.target.value)}
+                         disabled={!sourceWh}
+                         className="w-full pl-9 pr-8 py-2 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold text-slate-900 outline-none focus:border-indigo-500 focus:bg-white disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                       />
+                       {productSearch && (
+                         <button
+                           type="button"
+                           onClick={() => setProductSearch('')}
+                           className="absolute inset-y-0 right-0 pr-2.5 flex items-center text-slate-400 hover:text-slate-600"
+                           title="Clear search"
+                         >
+                           <Icons.Close />
+                         </button>
+                       )}
+                     </div>
                    </div>
                    <div className="flex-1 overflow-y-auto p-3 space-y-2 max-h-[400px] md:max-h-none custom-scrollbar">
                      {isLoading ? (
@@ -703,21 +749,25 @@ export default function ProductTransferPage() {
                        </div>
                      ) : availableStock.length === 0 ? (
                        <div className="text-center p-6 text-slate-400 text-sm font-medium">No stock available.</div>
+                     ) : filteredAvailableStock.length === 0 ? (
+                       <div className="text-center p-6 text-slate-400 text-xs font-bold">
+                         No products match &ldquo;{productSearch}&rdquo;.
+                       </div>
                      ) : (
-                       availableStock.map(stock => (
+                       filteredAvailableStock.map(stock => (
                          <div key={stock.id} className="flex items-center justify-between p-3 border border-slate-200 rounded-xl bg-white shadow-sm hover:border-indigo-300 transition-colors">
                            <div className="truncate pr-2">
                               <div className="flex items-center space-x-2">
-                                <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded uppercase ${stock.products.product_type === 'LPG' ? 'bg-orange-100 text-orange-700' : 'bg-emerald-100 text-emerald-700'}`}>
-                                  {stock.products.product_type}
+                                <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded uppercase shrink-0 ${stock.products?.product_type === 'LPG' ? 'bg-orange-100 text-orange-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                                  {stock.products?.product_type}
                                 </span>
-                                <p className="font-bold text-slate-900 text-xs truncate">{stock.products.name}</p>
+                                <p className="font-bold text-slate-900 text-xs truncate">{stock.products?.name}</p>
                               </div>
                               <p className="text-[10px] text-slate-500 font-mono mt-1">
-                                Avail: <span className="font-bold text-indigo-600">{stock.quantity}</span> {stock.products.unit_type}
+                                Code: <span className="font-bold text-slate-700">{stock.products?.code || 'N/A'}</span> | Avail: <span className="font-bold text-indigo-600">{stock.quantity}</span> {stock.products?.unit_type}
                               </p>
                            </div>
-                           <button onClick={() => handleAddToBag(stock)} className="w-8 h-8 rounded-lg bg-indigo-50 border border-indigo-100 text-indigo-600 flex items-center justify-center shrink-0 hover:bg-indigo-600 hover:text-white transition-colors shadow-sm">
+                           <button type="button" onClick={() => handleAddToBag(stock)} className="w-8 h-8 rounded-lg bg-indigo-50 border border-indigo-100 text-indigo-600 flex items-center justify-center shrink-0 hover:bg-indigo-600 hover:text-white transition-colors shadow-sm">
                              <Icons.Plus />
                            </button>
                          </div>
